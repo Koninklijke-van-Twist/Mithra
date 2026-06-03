@@ -1,0 +1,47 @@
+---
+description: Kernregels voor het Mithra-project (BC scanactiviteit)
+alwaysApply: true
+---
+
+# Mithra — projectregels
+
+## Scope en architectuur
+- Deze applicatie draait volledig vanuit `/web/` en wordt gepubliceerd onder `https://sleutels.kvt.nl/mithra`.
+- Houd links relatief (`index.php`, `odata.php?...`) of vanaf `/mithra/...` als absolute paden nodig zijn.
+- De app is mobile-first. Nieuwe UI-wijzigingen moeten eerst op telefoonscherm goed leesbaar zijn.
+
+## Niet wijzigen
+- `web/logincheck.php` niet aanpassen.
+- `web/odata.php` niet aanpassen.
+- `web/auth.php` alleen aanpassen na expliciete gebruikersvraag.
+
+## Data en logica
+- Hoofdflow staat in `web/index.php`.
+- Mithra-helpers: `mithra_config.php`, `mithra_bc.php`, `mithra_heatmap.php`, `mithra_scan_store.php`, `mithra_scan_sync.php`, `mithra_stats.php`.
+- Scanregels komen uit BC `Scanposten` via OData (`Entry_No`, `KVT_User_Name_Scanner`, `Scan_Process`, `Starting_Date`, `Starting_Time`).
+- `Starting_Time` behandelen als scantijd; lokaal combineren tot `scan_timestamp`.
+- Sync in chunks van 7 dagen; forward sync op nieuwste bekende timestamp; opslag in SQLite.
+
+## UI-regels
+- Geen zware frameworks zonder expliciet verzoek.
+- Gebruik favicon/manifest op elke HTML-pagina.
+- Gebruik op de hoofdpagina `logo-website.png`.
+- Heatmap-bovengrens configureren via `MITHRA_HEATMAP_INTENSITY_MAX` in `mithra_config.php`.
+
+## Veiligheid en kwaliteit
+- Vang OData-fouten af met korte gebruikersvriendelijke melding.
+- Cache-widget via `injectTimerHtml(...)` uit `odata.php`.
+- Unit-tests: zie regel `mithra-tests.mdc`; draai `php tests/run.php` na logica-wijzigingen.
+
+## BC-velden verifiëren
+- Extra OData-velden eerst controleren in `BC Webservices.txt`.
+- Alleen benodigde kolommen via `$select` opvragen.
+
+## Code-structuur (PHP/JS)
+- Sectievolgorde bij refactors: Includes → Constants → Variabelen → Functies → Page load.
+- Geen lege secties. Gedrag niet wijzigen door herordenen alleen.
+- Maximaal 1 class per bestand; classnaam = bestandsnaam.
+
+## Huisstijl
+- Perkins blauw `#00529B`, hoofdkleur `#0099cc`, licht blauw `#33ccff`.
+- Pagina's grotendeels wit; blauw voor headers, knoppen en accenten.

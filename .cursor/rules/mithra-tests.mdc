@@ -1,0 +1,24 @@
+---
+description: Unit-tests verplicht bij features en fixes in Mithra
+alwaysApply: true
+---
+
+# Mithra — unit-tests
+
+## Verplicht
+- Elke **nieuwe feature** krijgt minimaal één test in `tests/*_test.php`.
+- Elke **bugfix** krijgt een regression-test die het oorspronkelijke probleem afdekt.
+
+## Testrunner (lichtgewicht, geen PHPUnit)
+- Tests draaien met: `php tests/run.php`
+- Helper/asserties staan in `tests/mithra_test_lib.php`
+- Nieuwe tests als `tests/<onderwerp>_test.php`; bestand roept `mithra_test(...)` aan.
+
+## Richtlijnen
+- Test pure PHP-logica (heatmap, stats, sync, includes); geen OData/SQLite live calls tenzij strikt nodig.
+- Prefer fake/fixture data boven echte BC- of databankafhankelijkheid.
+- Na wijzigingen aan `web/mithra_*.php`: tests uitvoeren en groen houden.
+- Geen dubbele helpers: gedeelde functies horen op één plek (bijv. `mithra_normalize_date_only` alleen in `mithra_bc.php`).
+
+## Includes-regression
+- Laadcombinaties die in productie voorkomen moeten in tests blijven (zie `tests/includes_load_test.php`).
