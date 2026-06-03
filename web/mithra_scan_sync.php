@@ -176,8 +176,8 @@ function mithra_sync_chunk_progress(int $chunkCurrent, bool $backfillComplete): 
 {
     if ($backfillComplete) {
         return [
-            'chunk_current' => $chunkCurrent,
-            'chunk_total' => $chunkCurrent,
+            'chunk_current' => 0,
+            'chunk_total' => 0,
         ];
     }
 
@@ -185,6 +185,90 @@ function mithra_sync_chunk_progress(int $chunkCurrent, bool $backfillComplete): 
     return [
         'chunk_current' => $chunkCurrent,
         'chunk_total' => max($estimatedTotal, $chunkCurrent),
+    ];
+}
+
+function mithra_sync_refresh_backfill_state(array $state, string $company): array
+{
+    if ((int) ($state['backfill_complete'] ?? 0) !== 1 || trim((string) ($state['backfill_to_date'] ?? '')) !== '') {
+        return $state;
+    }
+
+    $oldestDate = mithra_normalize_date_only((string) ($state['oldest_scan_timestamp'] ?? ''));
+    if ($oldestDate === '') {
+        $bounds = mithra_store_recompute_bounds($company);
+        $oldestDate = mithra_normalize_date_only((string) ($bounds['oldest_scan_timestamp'] ?? ''));
+    }
+
+    if ($oldestDate !== '' && strcmp($oldestDate, mithra_sync_backfill_limit_date()) > 0) {
+        $state['backfill_complete'] = 0;
+    }
+
+    return $state;
+}
+
+function mithra_sync_needs_backfill_chunks(array $state): bool
+{
+    return (int) ($state['backfill_complete'] ?? 0) !== 1;
+}
+
+function mithra_sync_run(string $company): array
+{
+    $state = mithra_sync_refresh_backfill_state(mithra_store_get_sync_state($company), $company);
+
+    if (!mithra_sync_needs_backfill_chunks($state)) {
+        return mithra_sync_forward_only($company, $state);
+    }
+
+    return mithra_sync_backfill_chunk($company, $state);
+}
+
+function mithra_sync_forward_only(string $company, array $state): array
+{
+    $bounds = mithra_store_recompute_bounds($company);
+
+    if ($bounds['newest_scan_timestamp'] !== '') {
+        $state['newest_scan_timestamp'] = $bounds['newest_scan_timestamp'];
+    }
+    if ($bounds['oldest_scan_timestamp'] !== '') {
+        $state['oldest_scan_timestamp'] = $bounds['oldest_scan_timestamp'];
+    }
+
+    $fetchedEntries = [];
+    $newest = trim((string) ($state['newest_scan_timestamp'] ?? ''));
+    if ($newest !== '') {
+        $fetchedEntries = mithra_fetch_scanposten_newer_than($company, $newest);
+    }
+
+    $inserted = mithra_store_insert_entries($company, $fetchedEntries);
+    $bounds = mithra_store_recompute_bounds($company);
+
+    $newState = [
+        'newest_scan_timestamp' => $bounds['newest_scan_timestamp'],
+        'oldest_scan_timestamp' => $bounds['oldest_scan_timestamp'],
+        'backfill_to_date' => '',
+        'backfill_complete' => 1,
+        'chunks_completed' => (int) ($state['chunks_completed'] ?? 0),
+        'empty_backfill_months' => '',
+        'updated_at' => gmdate('c'),
+    ];
+
+    mithra_store_save_sync_state($company, $newState);
+
+    return [
+        'ok' => true,
+        'company' => $company,
+        'sync_phase' => 'forward',
+        'mode' => 'forward',
+        'from_date' => '',
+        'to_date' => '',
+        'fetched_count' => count($fetchedEntries),
+        'inserted_count' => $inserted,
+        'chunk_current' => 0,
+        'chunk_total' => 0,
+        'sync_state' => $newState,
+        'sync_complete' => true,
+        'needs_more_chunks' => false,
     ];
 }
 
@@ -231,17 +315,8 @@ function mithra_sync_resolve_backfill_range(array $state, string $company): arra
     ];
 }
 
-function mithra_sync_one_chunk(string $company): array
+function mithra_sync_backfill_chunk(string $company, array $state): array
 {
-    $state = mithra_store_get_sync_state($company);
-
-    if ((int) ($state['backfill_complete'] ?? 0) === 1 && trim((string) ($state['backfill_to_date'] ?? '')) === '') {
-        $oldestDate = mithra_normalize_date_only((string) ($state['oldest_scan_timestamp'] ?? ''));
-        if ($oldestDate !== '' && strcmp($oldestDate, mithra_sync_backfill_limit_date()) > 0) {
-            $state['backfill_complete'] = 0;
-        }
-    }
-
     $bounds = mithra_store_recompute_bounds($company);
 
     $chunksCompleted = (int) ($state['chunks_completed'] ?? 0);
@@ -336,6 +411,7 @@ function mithra_sync_one_chunk(string $company): array
     return [
         'ok' => true,
         'company' => $company,
+        'sync_phase' => 'backfill',
         'mode' => $modeLabel,
         'from_date' => $fromDate,
         'to_date' => $toDate,
@@ -347,6 +423,11 @@ function mithra_sync_one_chunk(string $company): array
         'sync_complete' => (int) $newState['backfill_complete'] === 1,
         'needs_more_chunks' => (int) $newState['backfill_complete'] !== 1,
     ];
+}
+
+function mithra_sync_one_chunk(string $company): array
+{
+    return mithra_sync_run($company);
 }
 
 function mithra_overview_payload(string $company): array

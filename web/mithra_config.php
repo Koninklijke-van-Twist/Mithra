@@ -9,7 +9,7 @@ const MITHRA_BC_SELECT_FIELDS = 'Entry_No,KVT_User_Name_Scanner,Scan_Process,Sta
 const MITHRA_SYNC_CHUNK_DAYS = 7;
 
 /** Stop backfill na dit aantal opeenvolgende maanden zonder scanregels. */
-const MITHRA_BACKFILL_EMPTY_MONTHS_STOP = 2;
+const MITHRA_BACKFILL_EMPTY_MONTHS_STOP = 6;
 
 /** Maximale terugwerkende backfill in dagen (fallback-grens). */
 const MITHRA_BACKFILL_MAX_DAYS = 3650;

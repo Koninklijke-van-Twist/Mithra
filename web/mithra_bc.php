@@ -85,8 +85,14 @@ function mithra_parse_starting_time(string $timeValue): string
         return '00:00:00';
     }
 
-    if (preg_match('/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/', $text, $matches)) {
-        return sprintf('%02d:%02d:%02d', (int) $matches[1], (int) $matches[2], (int) ($matches[3] ?? 0));
+    if (preg_match('/^(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.(\d+))?$/', $text, $matches)) {
+        $normalized = sprintf('%02d:%02d:%02d', (int) $matches[1], (int) $matches[2], (int) ($matches[3] ?? 0));
+        $fraction = trim((string) ($matches[4] ?? ''));
+        if ($fraction !== '') {
+            return $normalized . '.' . $fraction;
+        }
+
+        return $normalized;
     }
 
     if (preg_match('/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/i', $text, $matches)) {
@@ -119,6 +125,130 @@ function mithra_row_scan_timestamp(array $row): string
 
     $time = mithra_parse_starting_time((string) ($row['Starting_Time'] ?? ''));
     return $date . 'T' . $time;
+}
+
+function mithra_odata_quote_string(string $value): string
+{
+    return "'" . str_replace("'", "''", $value) . "'";
+}
+
+function mithra_scan_timestamp_time_only(string $scanTimestamp): string
+{
+    $text = trim($scanTimestamp);
+    if ($text === '') {
+        return '00:00:00';
+    }
+
+    $parts = preg_split('/[T\s]/', $text, 2);
+    $timePart = trim((string) ($parts[1] ?? ''));
+
+    return mithra_parse_starting_time($timePart);
+}
+
+/**
+ * Twee OData-filters voor forward sync: latere dagen + rest van de laatste scandag.
+ *
+ * @return list<string>
+ */
+function mithra_forward_sync_odata_filters(string $scanTimestamp): array
+{
+    $date = mithra_normalize_date_only($scanTimestamp);
+    if ($date === '') {
+        return [];
+    }
+
+    $time = mithra_scan_timestamp_time_only($scanTimestamp);
+    $timeLiteral = mithra_odata_quote_string($time);
+
+    return [
+        'Starting_Date gt ' . $date,
+        'Starting_Date eq ' . $date . ' and Starting_Time gt ' . $timeLiteral,
+    ];
+}
+
+/**
+ * @param list<array<string, mixed>> ...$entryLists
+ * @return list<array<string, mixed>>
+ */
+function mithra_merge_scan_entries(array ...$entryLists): array
+{
+    $byEntryNo = [];
+    foreach ($entryLists as $list) {
+        foreach ($list as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+
+            $entryNo = (int) ($entry['entry_no'] ?? 0);
+            if ($entryNo <= 0) {
+                continue;
+            }
+
+            $byEntryNo[$entryNo] = $entry;
+        }
+    }
+
+    $merged = array_values($byEntryNo);
+    usort($merged, static function (array $a, array $b): int {
+        return strcmp((string) ($a['scan_timestamp'] ?? ''), (string) ($b['scan_timestamp'] ?? ''));
+    });
+
+    return $merged;
+}
+
+/**
+ * @param list<array<string, mixed>> $entries
+ * @return list<array<string, mixed>>
+ */
+function mithra_filter_entries_newer_than(array $entries, string $scanTimestamp): array
+{
+    $timestamp = trim($scanTimestamp);
+    if ($timestamp === '') {
+        return [];
+    }
+
+    $result = [];
+    foreach ($entries as $entry) {
+        if (!is_array($entry)) {
+            continue;
+        }
+
+        $entryTimestamp = trim((string) ($entry['scan_timestamp'] ?? ''));
+        if ($entryTimestamp === '' || strcmp($entryTimestamp, $timestamp) <= 0) {
+            continue;
+        }
+
+        $result[] = $entry;
+    }
+
+    return $result;
+}
+
+function mithra_fetch_scanposten_with_filter(string $company, string $filter): array
+{
+    $query = [
+        '$select' => MITHRA_BC_SELECT_FIELDS,
+        '$filter' => $filter,
+        '$orderby' => 'Starting_Date asc,Starting_Time asc,Entry_No asc',
+    ];
+
+    $url = mithra_company_entity_url($company, $query);
+    $auth = auth_get_auth_for_company($company, MITHRA_ODATA_TTL);
+    $rows = odata_get_all($url, $auth, MITHRA_ODATA_TTL);
+
+    $entries = [];
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $entry = mithra_row_to_entry($row);
+        if ($entry !== null) {
+            $entries[] = $entry;
+        }
+    }
+
+    return $entries;
 }
 
 function mithra_row_to_entry(array $row): ?array
@@ -159,29 +289,8 @@ function mithra_fetch_scanposten_range(string $company, string $fromDate, string
     }
 
     $filter = "Starting_Date ge " . $from . " and Starting_Date le " . $to;
-    $query = [
-        '$select' => MITHRA_BC_SELECT_FIELDS,
-        '$filter' => $filter,
-        '$orderby' => 'Starting_Date asc,Starting_Time asc,Entry_No asc',
-    ];
 
-    $url = mithra_company_entity_url($company, $query);
-    $auth = auth_get_auth_for_company($company, MITHRA_ODATA_TTL);
-    $rows = odata_get_all($url, $auth, MITHRA_ODATA_TTL);
-
-    $entries = [];
-    foreach ($rows as $row) {
-        if (!is_array($row)) {
-            continue;
-        }
-
-        $entry = mithra_row_to_entry($row);
-        if ($entry !== null) {
-            $entries[] = $entry;
-        }
-    }
-
-    return $entries;
+    return mithra_fetch_scanposten_with_filter($company, $filter);
 }
 
 function mithra_fetch_scanposten_newer_than(string $company, string $scanTimestamp): array
@@ -191,39 +300,15 @@ function mithra_fetch_scanposten_newer_than(string $company, string $scanTimesta
         return [];
     }
 
-    $date = mithra_normalize_date_only($timestamp);
-    if ($date === '') {
+    $filters = mithra_forward_sync_odata_filters($timestamp);
+    if ($filters === []) {
         return [];
     }
 
-    $filter = "Starting_Date ge " . $date;
-    $query = [
-        '$select' => MITHRA_BC_SELECT_FIELDS,
-        '$filter' => $filter,
-        '$orderby' => 'Starting_Date asc,Starting_Time asc,Entry_No asc',
-    ];
-
-    $url = mithra_company_entity_url($company, $query);
-    $auth = auth_get_auth_for_company($company, MITHRA_ODATA_TTL);
-    $rows = odata_get_all($url, $auth, MITHRA_ODATA_TTL);
-
-    $entries = [];
-    foreach ($rows as $row) {
-        if (!is_array($row)) {
-            continue;
-        }
-
-        $entry = mithra_row_to_entry($row);
-        if ($entry === null) {
-            continue;
-        }
-
-        if (strcmp($entry['scan_timestamp'], $timestamp) <= 0) {
-            continue;
-        }
-
-        $entries[] = $entry;
+    $fetched = [];
+    foreach ($filters as $filter) {
+        $fetched[] = mithra_fetch_scanposten_with_filter($company, $filter);
     }
 
-    return $entries;
+    return mithra_filter_entries_newer_than(mithra_merge_scan_entries(...$fetched), $timestamp);
 }

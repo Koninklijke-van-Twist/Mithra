@@ -104,7 +104,7 @@ if (mithra_action_is('sync_chunk')) {
 
     try {
         auth_set_current_company_context($company, MITHRA_ODATA_TTL);
-        mithra_send_json(mithra_sync_one_chunk($company));
+        mithra_send_json(mithra_sync_run($company));
     } catch (Throwable $error) {
         mithra_runtime_error_payload($error, 'Synchroniseren van scanregels mislukt.');
     }
@@ -167,13 +167,21 @@ if (mithra_action_is('user_detail')) {
             box-sizing: border-box;
         }
 
+        html {
+            min-height: 100%;
+            background-color: var(--bg);
+        }
+
         body {
             margin: 0;
+            min-height: 100vh;
             color: var(--text);
-            background:
+            background-color: var(--bg);
+            background-image:
                 radial-gradient(900px 500px at -10% -10%, rgba(51, 204, 255, 0.18), transparent 55%),
-                radial-gradient(900px 500px at 110% 0%, rgba(0, 153, 204, 0.14), transparent 50%),
-                var(--bg);
+                radial-gradient(900px 500px at 110% 0%, rgba(0, 153, 204, 0.14), transparent 50%);
+            background-repeat: no-repeat;
+            background-attachment: fixed;
         }
 
         .page {
@@ -638,7 +646,7 @@ if (mithra_action_is('user_detail')) {
                         </option>
                     <?php endforeach; ?>
                 </select>
-                <button type="button" class="btn" id="syncBtn">Synchroniseren</button>
+
             </div>
         </div>
 
@@ -666,7 +674,6 @@ if (mithra_action_is('user_detail')) {
         (function ()
         {
             const companySelect = document.getElementById('companySelect');
-            const syncBtn = document.getElementById('syncBtn');
             const statusText = document.getElementById('statusText');
             const errorBanner = document.getElementById('errorBanner');
             const userGrid = document.getElementById('userGrid');
@@ -1012,6 +1019,30 @@ if (mithra_action_is('user_detail')) {
                 });
             }
 
+            function formatForwardSyncStatus(payload)
+            {
+                const inserted = Number(payload.inserted_count || 0);
+                const fetched = Number(payload.fetched_count || 0);
+
+                if (inserted > 0)
+                {
+                    return fetched + ' opgehaald, ' + inserted + ' nieuwe scans opgeslagen.';
+                }
+
+                return 'Geen nieuwe scans sinds laatste synchronisatie.';
+            }
+
+            function formatBackfillChunkStatus(payload, chunkCurrent, chunkTotal)
+            {
+                const inserted = Number(payload.inserted_count || 0);
+                const fetched = Number(payload.fetched_count || 0);
+
+                return 'Chunk <strong>' + chunkCurrent + ' van ' + chunkTotal + '</strong> ('
+                    + escapeHtml(String(payload.mode || '')) + ', '
+                    + escapeHtml(String(payload.from_date || '')) + ' t/m ' + escapeHtml(String(payload.to_date || '')) + '): '
+                    + fetched + ' opgehaald, ' + inserted + ' nieuw opgeslagen.';
+            }
+
             async function syncChunks()
             {
                 if (isSyncing)
@@ -1020,7 +1051,6 @@ if (mithra_action_is('user_detail')) {
                 }
 
                 isSyncing = true;
-                syncBtn.disabled = true;
                 showError('');
 
                 const company = selectedCompany();
@@ -1031,11 +1061,19 @@ if (mithra_action_is('user_detail')) {
                 {
                     while (true)
                     {
-                        const chunkDisplay = chunkCount + 1;
-                        const totalDisplay = chunkTotalEstimate !== null
-                            ? String(chunkTotalEstimate)
-                            : '…';
-                        statusText.innerHTML = '<strong>Synchroniseren…</strong> chunk ' + chunkDisplay + ' van ' + totalDisplay + ' voor ' + escapeHtml(company);
+                        if (chunkCount > 0)
+                        {
+                            const chunkDisplay = chunkCount + 1;
+                            const totalDisplay = chunkTotalEstimate !== null
+                                ? String(chunkTotalEstimate)
+                                : '…';
+                            statusText.innerHTML = '<strong>Backfill…</strong> chunk ' + chunkDisplay + ' van ' + totalDisplay + ' voor ' + escapeHtml(company);
+                        }
+                        else
+                        {
+                            statusText.textContent = 'Synchroniseren voor ' + company + '…';
+                        }
+
                         const response = await fetch('index.php?action=sync_chunk', {
                             method: 'POST',
                             headers: { 'Accept': 'application/json' },
@@ -1049,22 +1087,24 @@ if (mithra_action_is('user_detail')) {
                             throw new Error((payload && payload.error) || 'Synchroniseren mislukt.');
                         }
 
+                        if (payload.sync_phase === 'forward')
+                        {
+                            statusText.textContent = formatForwardSyncStatus(payload);
+                            await fetchOverview();
+                            break;
+                        }
+
                         chunkCount++;
                         chunkTotalEstimate = Number(payload.chunk_total || chunkTotalEstimate || chunkCount);
                         const chunkCurrent = Number(payload.chunk_current || chunkCount);
                         const chunkTotal = Number(payload.chunk_total || chunkTotalEstimate);
-                        const inserted = Number(payload.inserted_count || 0);
-                        const fetched = Number(payload.fetched_count || 0);
-                        statusText.innerHTML = 'Laatste chunk: <strong>' + chunkCurrent + ' van ' + chunkTotal + '</strong> ('
-                            + escapeHtml(String(payload.mode || '')) + ', '
-                            + escapeHtml(String(payload.from_date || '')) + ' t/m ' + escapeHtml(String(payload.to_date || '')) + '), '
-                            + fetched + ' opgehaald, ' + inserted + ' nieuw opgeslagen.';
+                        statusText.innerHTML = formatBackfillChunkStatus(payload, chunkCurrent, chunkTotal);
 
                         await fetchOverview();
 
                         if (!payload.needs_more_chunks)
                         {
-                            statusText.innerHTML = 'Synchronisatie voltooid. <strong>' + chunkCurrent + ' van ' + chunkTotal + '</strong> chunks verwerkt.';
+                            statusText.innerHTML = 'Gegevens geladen.';
                             break;
                         }
 
@@ -1082,14 +1122,8 @@ if (mithra_action_is('user_detail')) {
                 finally
                 {
                     isSyncing = false;
-                    syncBtn.disabled = false;
                 }
             }
-
-            syncBtn.addEventListener('click', function ()
-            {
-                syncChunks();
-            });
 
             companySelect.addEventListener('change', async function ()
             {
