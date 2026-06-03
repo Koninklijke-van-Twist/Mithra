@@ -22,6 +22,6 @@ const MITHRA_HEATMAP_ROWS = 4;
 const MITHRA_MODAL_HEATMAP_ROWS = 50;
 
 /** Bovengrens voor blauwe intensiteit; hogere waarden worden geel weergegeven. */
-const MITHRA_HEATMAP_INTENSITY_MAX = 50;
+const MITHRA_HEATMAP_INTENSITY_MAX = 100;
 
 const MITHRA_ODATA_TTL = 300;
