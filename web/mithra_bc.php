@@ -229,6 +229,71 @@ function mithra_filter_entries_newer_than(array $entries, string $scanTimestamp)
     return $result;
 }
 
+function mithra_odata_http_code_from_error(Throwable $error): ?int
+{
+    if (preg_match('/HTTP (\d{3}) from OData/i', $error->getMessage(), $matches) !== 1) {
+        return null;
+    }
+
+    return (int) $matches[1];
+}
+
+function mithra_odata_error_is_retryable(Throwable $error): bool
+{
+    if (strpos(strtolower($error->getMessage()), 'curl error') !== false) {
+        return true;
+    }
+
+    $httpCode = mithra_odata_http_code_from_error($error);
+    if ($httpCode === 409) {
+        return true;
+    }
+
+    if ($httpCode !== null && in_array($httpCode, [408, 423, 429, 500, 502, 503, 504], true)) {
+        return true;
+    }
+
+    if (strpos(strtolower($error->getMessage()), 'please try again later') !== false) {
+        return true;
+    }
+
+    return false;
+}
+
+function mithra_odata_get_all_with_retry(string $url, array $auth, ?int $ttlSeconds = null): array
+{
+    if (!function_exists('odata_get_all')) {
+        throw new RuntimeException('OData helper ontbreekt.');
+    }
+
+    $ttl = $ttlSeconds ?? MITHRA_ODATA_TTL;
+    $maxAttempts = max(1, MITHRA_ODATA_RETRY_ATTEMPTS);
+    $delaySeconds = max(0, MITHRA_ODATA_RETRY_DELAY_SECONDS);
+    $lastError = null;
+
+    for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+        try {
+            $rows = odata_get_all($url, $auth, $ttl);
+            return is_array($rows) ? $rows : [];
+        } catch (Throwable $error) {
+            $lastError = $error;
+            if ($attempt >= $maxAttempts || !mithra_odata_error_is_retryable($error)) {
+                throw $error;
+            }
+
+            if ($delaySeconds > 0) {
+                sleep($delaySeconds);
+            }
+        }
+    }
+
+    if ($lastError instanceof Throwable) {
+        throw $lastError;
+    }
+
+    throw new RuntimeException('OData ophalen mislukt.');
+}
+
 function mithra_fetch_entity_with_filter(string $company, string $entity, string $selectFields, string $filter, string $orderBy): array
 {
     $query = [
@@ -239,9 +304,8 @@ function mithra_fetch_entity_with_filter(string $company, string $entity, string
 
     $url = mithra_company_entity_url($company, $query, null, $entity);
     $auth = auth_get_auth_for_company($company, MITHRA_ODATA_TTL);
-    $rows = odata_get_all($url, $auth, MITHRA_ODATA_TTL);
 
-    return is_array($rows) ? $rows : [];
+    return mithra_odata_get_all_with_retry($url, $auth, MITHRA_ODATA_TTL);
 }
 
 function mithra_fetch_scanposten_with_filter(string $company, string $filter): array

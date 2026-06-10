@@ -36,3 +36,9 @@ const MITHRA_HEATMAP_INTENSITY_MAX = 500;
 const MITHRA_HEATMAP_OVER_LIMIT_MULTIPLIER = 5;
 
 const MITHRA_ODATA_TTL = 300;
+
+/** Aantal pogingen bij tijdelijke BC/OData-fouten (bijv. transactie in werking). */
+const MITHRA_ODATA_RETRY_ATTEMPTS = 300;
+
+/** Wacht tussen OData-retries in seconden. */
+const MITHRA_ODATA_RETRY_DELAY_SECONDS = 3;
