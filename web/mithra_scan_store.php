@@ -222,7 +222,7 @@ function mithra_store_insert_entries(string $company, array $entries): int
 
         $stmt->bindValue(':company', $companyKey, SQLITE3_TEXT);
         $stmt->bindValue(':entry_no', $entryNo, SQLITE3_INTEGER);
-        $stmt->bindValue(':username', trim((string) ($entry['username'] ?? '')), SQLITE3_TEXT);
+        $stmt->bindValue(':username', mithra_normalize_username(trim((string) ($entry['username'] ?? ''))), SQLITE3_TEXT);
         $stmt->bindValue(':scan_process', trim((string) ($entry['scan_process'] ?? '')), SQLITE3_TEXT);
         $stmt->bindValue(':scan_timestamp', trim((string) ($entry['scan_timestamp'] ?? '')), SQLITE3_TEXT);
         $stmt->execute();

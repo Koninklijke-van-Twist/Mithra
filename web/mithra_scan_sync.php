@@ -625,8 +625,8 @@ function mithra_overview_payload(string $company): array
 
     $users = [];
     foreach (mithra_store_list_activity_usernames($company) as $username) {
-        $scanCounts = mithra_store_daily_counts($company, $username, $fromDate, $today);
-        $whCounts = mithra_wh_store_daily_counts($company, $username, $fromDate, $today);
+        $scanCounts = mithra_store_merged_scan_daily_counts($company, $username, $fromDate, $today);
+        $whCounts = mithra_store_merged_wh_daily_counts($company, $username, $fromDate, $today);
         $counts = mithra_store_merge_daily_counts($scanCounts, $whCounts);
         $days = mithra_heatmap_build_grid_days($counts, $today);
 

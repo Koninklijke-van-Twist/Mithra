@@ -138,3 +138,81 @@ function mithra_heatmap_build_grid_days(array $countsByDate, string $today = '',
 
     return $days;
 }
+
+function mithra_heatmap_png_dimensions(?int $rows = null, ?int $cols = null, ?int $cellPx = null, ?int $gapPx = null): array
+{
+    $rowCount = mithra_heatmap_grid_rows($rows);
+    $colCount = mithra_heatmap_grid_cols($cols);
+    $cell = max(1, $cellPx ?? MITHRA_HEATMAP_CELL_PX);
+    $gap = max(0, $gapPx ?? MITHRA_HEATMAP_CELL_GAP);
+
+    return [
+        'width' => ($colCount * $cell) + (max(0, $colCount - 1) * $gap),
+        'height' => ($rowCount * $cell) + (max(0, $rowCount - 1) * $gap),
+        'cell_px' => $cell,
+        'gap_px' => $gap,
+        'rows' => $rowCount,
+        'cols' => $colCount,
+    ];
+}
+
+function mithra_heatmap_activity_level(int $count, int $intensityMax = MITHRA_HEATMAP_INTENSITY_MAX): string
+{
+    if ($count <= 0) {
+        return '';
+    }
+
+    if ($count > $intensityMax) {
+        return 'level-over';
+    }
+
+    if ($count >= $intensityMax) {
+        return 'level-max';
+    }
+
+    if ($count >= (int) ceil($intensityMax * 0.75)) {
+        return 'level-4';
+    }
+
+    if ($count >= (int) ceil($intensityMax * 0.5)) {
+        return 'level-3';
+    }
+
+    if ($count >= (int) ceil($intensityMax * 0.25)) {
+        return 'level-2';
+    }
+
+    return 'level-1';
+}
+
+function mithra_heatmap_limit_highlight_blend_ratio(int $count, int $intensityMax = MITHRA_HEATMAP_INTENSITY_MAX): float
+{
+    if ($count < $intensityMax) {
+        return 0.0;
+    }
+
+    $cap = $intensityMax * MITHRA_HEATMAP_OVER_LIMIT_MULTIPLIER;
+    $range = $cap - $intensityMax;
+    if ($range <= 0) {
+        return 1.0;
+    }
+
+    return min(1.0, ($count - $intensityMax) / $range);
+}
+
+function mithra_heatmap_limit_highlight_rgb(int $count, int $intensityMax = MITHRA_HEATMAP_INTENSITY_MAX): array
+{
+    if ($count < $intensityMax) {
+        return [255, 255, 0];
+    }
+
+    $ratio = mithra_heatmap_limit_highlight_blend_ratio($count, $intensityMax);
+    $from = [255, 255, 0];
+    $to = [255, 136, 0];
+
+    return [
+        (int) round($from[0] + (($to[0] - $from[0]) * $ratio)),
+        (int) round($from[1] + (($to[1] - $from[1]) * $ratio)),
+        (int) round($from[2] + (($to[2] - $from[2]) * $ratio)),
+    ];
+}

@@ -26,6 +26,7 @@ mithra_test('mithra_normalize_date_only staat alleen in mithra_bc.php', static f
     $storeFile = dirname(__DIR__) . '/web/mithra_scan_store.php';
 
     mithra_assert_same(1, substr_count((string) file_get_contents($bcFile), 'function mithra_normalize_date_only'));
+    mithra_assert_same(1, substr_count((string) file_get_contents($bcFile), 'function mithra_normalize_username'));
     mithra_assert_same(0, substr_count((string) file_get_contents($heatmapFile), 'function mithra_normalize_date_only'));
     mithra_assert_same(0, substr_count((string) file_get_contents($storeFile), 'function mithra_normalize_date_only'));
 });

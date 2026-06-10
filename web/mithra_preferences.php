@@ -1,6 +1,11 @@
 <?php
 
 /**
+ * Includes/requires
+ */
+require_once __DIR__ . '/mithra_bc.php';
+
+/**
  * Functies
  */
 function mithra_ensure_session(): void
@@ -51,11 +56,11 @@ function mithra_normalize_hidden_usernames(mixed $value): array
 
     $normalized = [];
     foreach ($value as $username) {
-        $name = trim((string) $username);
+        $name = mithra_normalize_username(trim((string) $username));
         if ($name === '') {
             continue;
         }
-        $normalized[strtolower($name)] = $name;
+        $normalized[mithra_username_match_key($name)] = $name;
     }
 
     $usernames = array_values($normalized);
@@ -87,7 +92,7 @@ function mithra_set_user_hidden(string $company, string $username, bool $hidden)
     mithra_ensure_session();
 
     $companyKey = mithra_preferences_company_key($company);
-    $username = trim($username);
+    $username = mithra_normalize_username(trim($username));
     if ($companyKey === '' || $username === '') {
         throw new RuntimeException('Bedrijf of gebruiker ontbreekt.');
     }
@@ -101,10 +106,9 @@ function mithra_set_user_hidden(string $company, string $username, bool $hidden)
     }
 
     $current = mithra_normalize_hidden_usernames($_SESSION['mithra_hidden_users'][$userKey][$companyKey] ?? []);
-    $lookup = strtolower($username);
     $filtered = [];
     foreach ($current as $existing) {
-        if (strcasecmp($existing, $username) !== 0) {
+        if (!mithra_usernames_match($existing, $username)) {
             $filtered[] = $existing;
         }
     }
@@ -114,6 +118,28 @@ function mithra_set_user_hidden(string $company, string $username, bool $hidden)
     }
 
     $_SESSION['mithra_hidden_users'][$userKey][$companyKey] = mithra_normalize_hidden_usernames($filtered);
+
+    return $_SESSION['mithra_hidden_users'][$userKey][$companyKey];
+}
+
+function mithra_set_hidden_usernames(string $company, array $usernames): array
+{
+    mithra_ensure_session();
+
+    $companyKey = mithra_preferences_company_key($company);
+    if ($companyKey === '') {
+        throw new RuntimeException('Bedrijf ontbreekt.');
+    }
+
+    $userKey = mithra_current_user_key();
+    if (!is_array($_SESSION['mithra_hidden_users'] ?? null)) {
+        $_SESSION['mithra_hidden_users'] = [];
+    }
+    if (!is_array($_SESSION['mithra_hidden_users'][$userKey] ?? null)) {
+        $_SESSION['mithra_hidden_users'][$userKey] = [];
+    }
+
+    $_SESSION['mithra_hidden_users'][$userKey][$companyKey] = mithra_normalize_hidden_usernames($usernames);
 
     return $_SESSION['mithra_hidden_users'][$userKey][$companyKey];
 }

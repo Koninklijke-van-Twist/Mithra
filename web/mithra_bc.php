@@ -278,10 +278,37 @@ function mithra_username_from_user_id(string $userId): string
 
     $at = strpos($text, '@');
     if ($at === false) {
-        return $text;
+        return mithra_normalize_username($text);
     }
 
-    return trim(substr($text, 0, $at));
+    return mithra_normalize_username(trim(substr($text, 0, $at)));
+}
+
+function mithra_normalize_username(string $username): string
+{
+    $name = trim($username);
+    if ($name === '') {
+        return '';
+    }
+
+    if (preg_match('/^kvt\\\\(.+)$/i', $name, $matches) === 1) {
+        return trim((string) ($matches[1] ?? ''));
+    }
+
+    return $name;
+}
+
+function mithra_username_match_key(string $username): string
+{
+    return strtolower(mithra_normalize_username($username));
+}
+
+function mithra_usernames_match(string $left, string $right): bool
+{
+    $leftKey = mithra_username_match_key($left);
+    $rightKey = mithra_username_match_key($right);
+
+    return $leftKey !== '' && $leftKey === $rightKey;
 }
 
 function mithra_wh_row_is_activity(array $row): bool
@@ -481,7 +508,7 @@ function mithra_row_to_entry(array $row): ?array
         return null;
     }
 
-    $username = trim((string) ($row['KVT_User_Name_Scanner'] ?? ''));
+    $username = mithra_normalize_username(trim((string) ($row['KVT_User_Name_Scanner'] ?? '')));
     if ($username === '') {
         return null;
     }

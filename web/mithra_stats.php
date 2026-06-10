@@ -337,13 +337,20 @@ function mithra_stats_chart_30_days(array $entries, string $timestampField): arr
 
 function mithra_user_detail_payload(string $company, string $username): array
 {
-    $username = trim($username);
+    $username = mithra_normalize_username(trim($username));
     if ($username === '') {
         throw new RuntimeException('Gebruikersnaam ontbreekt.');
     }
 
-    $scanEntries = mithra_store_user_entries($company, $username);
-    $whEntries = mithra_wh_store_user_entries($company, $username);
+    $scanEntries = [];
+    foreach (mithra_store_activity_username_variants($company, $username) as $variant) {
+        $scanEntries = array_merge($scanEntries, mithra_store_user_entries($company, $variant));
+    }
+
+    $whEntries = [];
+    foreach (mithra_store_activity_username_variants($company, $username) as $variant) {
+        $whEntries = array_merge($whEntries, mithra_wh_store_user_entries($company, $variant));
+    }
     if ($scanEntries === [] && $whEntries === []) {
         throw new RuntimeException('Geen activiteit gevonden voor deze gebruiker.');
     }

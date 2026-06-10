@@ -21,10 +21,18 @@ const MITHRA_HEATMAP_DAYS = 28;
 const MITHRA_HEATMAP_COLS = 7;
 const MITHRA_HEATMAP_ROWS = 4;
 
+/** Kaart-PNG: moet overeenkomen met CSS .heat-cell / .heatmap in index.php */
+const MITHRA_HEATMAP_CELL_PX = 14;
+const MITHRA_HEATMAP_CELL_GAP = 2;
+const MITHRA_HEATMAP_CELL_RADIUS = 2;
+
 /** Aantal weekrijen in het heatmap-grid naast het gebruikersmodal. */
 const MITHRA_MODAL_HEATMAP_ROWS = 50;
 
 /** Bovengrens voor blauwe intensiteit; hogere waarden worden geel weergegeven. */
 const MITHRA_HEATMAP_INTENSITY_MAX = 100;
+
+/** Op/ boven limiet: PNG loopt van oranje (#FF8800) naar geel (#FFFF00) tot dit veelvoud. */
+const MITHRA_HEATMAP_OVER_LIMIT_MULTIPLIER = 5;
 
 const MITHRA_ODATA_TTL = 300;

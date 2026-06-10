@@ -33,7 +33,7 @@ function mithra_wh_store_insert_entries(string $company, array $entries): int
 
         $stmt->bindValue(':company', $companyKey, SQLITE3_TEXT);
         $stmt->bindValue(':entry_no', $entryNo, SQLITE3_INTEGER);
-        $stmt->bindValue(':username', trim((string) ($entry['username'] ?? '')), SQLITE3_TEXT);
+        $stmt->bindValue(':username', mithra_normalize_username(trim((string) ($entry['username'] ?? ''))), SQLITE3_TEXT);
         $stmt->bindValue(':entry_type', trim((string) ($entry['entry_type'] ?? '')), SQLITE3_TEXT);
         $stmt->bindValue(':whse_document_no', trim((string) ($entry['whse_document_no'] ?? '')), SQLITE3_TEXT);
         $stmt->bindValue(':action_label', trim((string) ($entry['action_label'] ?? '')), SQLITE3_TEXT);
@@ -188,17 +188,64 @@ function mithra_store_list_activity_usernames(string $company): array
     );
     $unique = [];
     foreach ($combined as $username) {
-        $key = strtolower(trim((string) $username));
-        if ($key === '') {
+        $matchKey = mithra_username_match_key($username);
+        if ($matchKey === '') {
             continue;
         }
-        $unique[$key] = trim((string) $username);
+
+        $canonical = mithra_normalize_username($username);
+        if ($canonical === '') {
+            $canonical = trim((string) $username);
+        }
+
+        if (!isset($unique[$matchKey])) {
+            $unique[$matchKey] = $canonical;
+        }
     }
 
     $usernames = array_values($unique);
     sort($usernames, SORT_NATURAL | SORT_FLAG_CASE);
 
     return $usernames;
+}
+
+function mithra_store_activity_username_variants(string $company, string $username): array
+{
+    $targetKey = mithra_username_match_key($username);
+    if ($targetKey === '') {
+        return [];
+    }
+
+    $variants = [];
+    foreach (array_merge(mithra_store_list_usernames($company), mithra_wh_store_list_usernames($company)) as $name) {
+        if (mithra_username_match_key($name) !== $targetKey) {
+            continue;
+        }
+
+        $variants[$name] = trim((string) $name);
+    }
+
+    return array_values($variants);
+}
+
+function mithra_store_merged_scan_daily_counts(string $company, string $username, string $fromDate, string $toDate): array
+{
+    $merged = [];
+    foreach (mithra_store_activity_username_variants($company, $username) as $variant) {
+        $merged = mithra_store_merge_daily_counts($merged, mithra_store_daily_counts($company, $variant, $fromDate, $toDate));
+    }
+
+    return $merged;
+}
+
+function mithra_store_merged_wh_daily_counts(string $company, string $username, string $fromDate, string $toDate): array
+{
+    $merged = [];
+    foreach (mithra_store_activity_username_variants($company, $username) as $variant) {
+        $merged = mithra_store_merge_daily_counts($merged, mithra_wh_store_daily_counts($company, $variant, $fromDate, $toDate));
+    }
+
+    return $merged;
 }
 
 function mithra_store_merge_daily_counts(array ...$countMaps): array

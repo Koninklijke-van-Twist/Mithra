@@ -16,6 +16,7 @@ require_once __DIR__ . '/mithra_scan_store.php';
 require_once __DIR__ . '/mithra_scan_sync.php';
 require_once __DIR__ . '/mithra_stats.php';
 require_once __DIR__ . '/mithra_preferences.php';
+require_once __DIR__ . '/mithra_heatmap_image.php';
 
 /**
  * Functies
@@ -59,6 +60,7 @@ function mithra_validate_company(string $company, array $companies): void
  */
 $companies = mithra_discover_companies();
 $selectedCompany = mithra_selected_company($companies);
+$cardHeatmapDims = mithra_heatmap_card_display_dimensions();
 $cacheWidget = injectTimerHtml([
     'title' => 'OData cache',
     'label' => 'Cache',
@@ -103,6 +105,30 @@ if (mithra_action_is('save_hidden')) {
     }
 }
 
+if (mithra_action_is('save_hidden_list')) {
+    $company = trim((string) ($_POST['company'] ?? $_GET['company'] ?? ''));
+    mithra_validate_company($company, $companies);
+
+    $hiddenList = $_POST['hidden_usernames'] ?? [];
+    if (is_string($hiddenList)) {
+        $decoded = json_decode($hiddenList, true);
+        $hiddenList = is_array($decoded) ? $decoded : [];
+    }
+    if (!is_array($hiddenList)) {
+        $hiddenList = [];
+    }
+
+    try {
+        mithra_send_json([
+            'ok' => true,
+            'company' => $company,
+            'hidden_usernames' => mithra_set_hidden_usernames($company, $hiddenList),
+        ]);
+    } catch (Throwable $error) {
+        mithra_runtime_error_payload($error, 'Zichtbaarheid opslaan mislukt.');
+    }
+}
+
 if (mithra_action_is('save_company')) {
     $company = trim((string) ($_POST['company'] ?? $_GET['company'] ?? ''));
     mithra_validate_company($company, $companies);
@@ -140,6 +166,23 @@ if (mithra_action_is('overview')) {
         mithra_send_json($payload);
     } catch (Throwable $error) {
         mithra_runtime_error_payload($error, 'Overzicht laden mislukt.');
+    }
+}
+
+if (mithra_action_is('heatmap_png')) {
+    $countsRaw = trim((string) ($_GET['counts'] ?? $_POST['counts'] ?? ''));
+    $intensityMax = (int) ($_GET['max'] ?? $_POST['max'] ?? MITHRA_HEATMAP_INTENSITY_MAX);
+    if ($intensityMax <= 0) {
+        $intensityMax = MITHRA_HEATMAP_INTENSITY_MAX;
+    }
+
+    try {
+        mithra_heatmap_send_counts_png($countsRaw, $intensityMax);
+    } catch (Throwable $error) {
+        http_response_code(500);
+        header('Content-Type: text/plain; charset=utf-8');
+        echo 'Heatmap laden mislukt.';
+        exit;
     }
 }
 
@@ -352,6 +395,8 @@ if (mithra_action_is('user_detail')) {
             box-shadow: var(--shadow);
             cursor: pointer;
             transition: box-shadow 140ms ease;
+            content-visibility: auto;
+            contain-intrinsic-size: auto 200px;
         }
 
         .user-card:hover {
@@ -508,6 +553,33 @@ if (mithra_action_is('user_detail')) {
             font-variant-numeric: tabular-nums;
         }
 
+        .user-card-heatmap-wrap {
+            position: relative;
+            width: <?= (int) $cardHeatmapDims['width'] ?>px;
+            height: <?= (int) $cardHeatmapDims['height'] ?>px;
+        }
+
+        .user-card-heatmap {
+            display: block;
+            width: 100%;
+            height: 100%;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+            background: var(--heat-empty);
+        }
+
+        .user-card-heatmap[data-heatmap-loaded="1"] {
+            background: transparent;
+        }
+
+        .user-card-heatmap-today {
+            position: absolute;
+            box-sizing: border-box;
+            border: 1px solid rgb(230, 152, 152);
+            border-radius: 2px;
+            pointer-events: none;
+        }
+
         .heatmap {
             display: grid;
             grid-template-columns: repeat(7, 14px);
@@ -532,10 +604,6 @@ if (mithra_action_is('user_detail')) {
             border-color: var(--heat-today-border);
         }
 
-        .heat-cell.level-over.today {
-            border: 1px solid var(--heat-today-border);
-        }
-
         .heat-cell.level-1 {
             background: rgba(0, 153, 204, 0.22);
         }
@@ -556,14 +624,21 @@ if (mithra_action_is('user_detail')) {
             background: var(--brand);
         }
 
+        .heat-cell.level-highlight,
         .heat-cell.level-over {
-            background: var(--heat-over);
+            border: 1px solid rgba(0, 0, 0, 0.04);
+        }
+
+        .heat-cell.level-over {
             display: flex;
             align-items: center;
             justify-content: center;
             padding: 0;
             overflow: hidden;
-            border: none;
+        }
+
+        .heat-cell.level-over.today {
+            border: 1px solid var(--heat-today-border);
         }
 
         .heat-cell-medal {
@@ -832,17 +907,43 @@ if (mithra_action_is('user_detail')) {
             const modalClose = document.getElementById('modalClose');
 
             let heatmapIntensityMax = <?= (int) MITHRA_HEATMAP_INTENSITY_MAX ?>;
+            const heatmapOverLimitMultiplier = <?= (int) MITHRA_HEATMAP_OVER_LIMIT_MULTIPLIER ?>;
+            const cardHeatmapCellCount = <?= (int) (MITHRA_HEATMAP_ROWS * MITHRA_HEATMAP_COLS) ?>;
+            const cardHeatmapLoadConcurrency = 6;
+            let cardHeatmapsEnabled = false;
+            let cardHeatmapLoadQueue = Promise.resolve();
+            const cardHeatmapWidth = <?= (int) $cardHeatmapDims['width'] ?>;
+            const cardHeatmapHeight = <?= (int) $cardHeatmapDims['height'] ?>;
+            const cardHeatmapCellPx = <?= (int) MITHRA_HEATMAP_CELL_PX ?>;
+            const cardHeatmapCellGap = <?= (int) MITHRA_HEATMAP_CELL_GAP ?>;
+            const cardHeatmapCols = <?= (int) MITHRA_HEATMAP_COLS ?>;
             let isSyncing = false;
             let overviewUsers = [];
             let hiddenUsernames = new Set();
-            let visibilityAnimating = false;
+            const hidingUserKeys = new Set();
+            const fadingCards = new Map();
+            let hiddenPersistTimer = null;
+            let hiddenPersistDirty = false;
+            let hiddenPersistInFlight = false;
 
             const eyeOpenSvg = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 5C7 5 2.73 8.11 1 12c1.73 3.89 6 7 11 7s9.27-3.11 11-7c-1.73-3.89-6-7-11-7zm0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"/></svg>';
             const eyeClosedSvg = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 6.5c2.76 0 5.26 1.12 7.08 2.92L17.5 11l1.41 1.41 2.59-2.58C23.27 7.89 19 4.5 12 4.5c-1.4 0-2.68.2-3.85.54l1.53 1.53C10.4 6.53 11.17 6.5 12 6.5zM2.27 3.77 1 5.04l2.05 2.05C2.73 8.11 1 11 1 12c1.73 3.89 6 7 11 7 1.77 0 3.43-.4 4.92-1.09l2.2 2.2 1.27-1.27L2.27 3.77zM7.53 9.8 9.16 11.4C9.06 11.59 9 11.79 9 12a3 3 0 0 0 3 3c.21 0 .41-.06.6-.16l1.6 1.6A4.98 4.98 0 0 1 12 17a5 5 0 0 1-5-5c0-.79.19-1.53.53-2.2z"/></svg>';
 
+            function normalizeUsername(value)
+            {
+                const name = String(value || '').trim();
+                if (name === '')
+                {
+                    return '';
+                }
+
+                const match = name.match(/^kvt\\(.+)$/i);
+                return match ? String(match[1] || '').trim() : name;
+            }
+
             function usernameKey(value)
             {
-                return String(value || '').trim().toLowerCase();
+                return normalizeUsername(value).toLowerCase();
             }
 
             function isUserHidden(username)
@@ -890,17 +991,246 @@ if (mithra_action_is('user_detail')) {
                 return null;
             }
 
-            function fadeOutCard(card)
+            function findInsertBeforeElement(username)
             {
-                card.style.pointerEvents = 'none';
-                return card.animate([
+                const targetKey = usernameKey(username);
+                let afterTarget = false;
+
+                for (const user of overviewUsers)
+                {
+                    const entryUsername = String(user.username || '');
+                    if (usernameKey(entryUsername) === targetKey)
+                    {
+                        afterTarget = true;
+                        continue;
+                    }
+
+                    if (afterTarget && !isUserHidden(entryUsername))
+                    {
+                        return findUserCardElement(entryUsername);
+                    }
+                }
+
+                return null;
+            }
+
+            function cancelCardFade(username)
+            {
+                const key = usernameKey(username);
+                const entry = fadingCards.get(key);
+                if (!entry)
+                {
+                    return;
+                }
+
+                entry.animation.cancel();
+                if (entry.card.parentNode === userGrid)
+                {
+                    entry.card.remove();
+                }
+
+                fadingCards.delete(key);
+                hidingUserKeys.delete(key);
+            }
+
+            function fadeOutAndRemoveCard(card, username)
+            {
+                const key = usernameKey(username);
+                hidingUserKeys.add(key);
+
+                const animation = card.animate([
                     { opacity: 1 },
                     { opacity: 0 }
                 ], {
                     duration: 220,
                     easing: 'ease-out',
                     fill: 'forwards'
-                }).finished;
+                });
+
+                fadingCards.set(key, { card: card, animation: animation });
+
+                card.style.pointerEvents = 'none';
+
+                animation.finished.then(function ()
+                {
+                    if (card.parentNode === userGrid)
+                    {
+                        card.remove();
+                    }
+                }).catch(function ()
+                {
+                    // Geannuleerd via showUserCard.
+                }).finally(function ()
+                {
+                    fadingCards.delete(key);
+                    hidingUserKeys.delete(key);
+                });
+            }
+
+            function heatmapTodayCellIndex(days)
+            {
+                const todayKey = todayDateKey();
+                const list = Array.isArray(days) ? days : [];
+                for (let index = 0; index < list.length; index++)
+                {
+                    if (String(list[index].date || '') === todayKey)
+                    {
+                        return index;
+                    }
+                }
+
+                return -1;
+            }
+
+            function renderUserCardHeatmapTodayOverlay(days)
+            {
+                const index = heatmapTodayCellIndex(days);
+                if (index < 0)
+                {
+                    return '';
+                }
+
+                const col = index % cardHeatmapCols;
+                const row = Math.floor(index / cardHeatmapCols);
+                const left = col * (cardHeatmapCellPx + cardHeatmapCellGap);
+                const top = row * (cardHeatmapCellPx + cardHeatmapCellGap);
+
+                return '<span class="user-card-heatmap-today" style="left:' + left + 'px;top:' + top + 'px;width:'
+                    + cardHeatmapCellPx + 'px;height:' + cardHeatmapCellPx + 'px"></span>';
+            }
+
+            function heatmapCountsParam(days)
+            {
+                const list = Array.isArray(days) ? days : [];
+                const values = [];
+                for (let index = 0; index < cardHeatmapCellCount; index++)
+                {
+                    const day = list[index] || {};
+                    if (day.future)
+                    {
+                        values.push(-1);
+                        continue;
+                    }
+
+                    values.push(Number(day.count || 0));
+                }
+
+                return values.join(',');
+            }
+
+            function heatmapImageUrl(countsParam)
+            {
+                const params = new URLSearchParams({
+                    action: 'heatmap_png',
+                    counts: String(countsParam || ''),
+                    max: String(heatmapIntensityMax)
+                });
+                return 'index.php?' + params.toString();
+            }
+
+            function assignHeatmapSrcAsync(img)
+            {
+                const countsParam = String(img.getAttribute('data-heatmap-counts') || '');
+                if (countsParam === '')
+                {
+                    return Promise.resolve();
+                }
+
+                return new Promise(function (resolve)
+                {
+                    function done()
+                    {
+                        img.dataset.heatmapLoaded = '1';
+                        resolve();
+                    }
+
+                    img.addEventListener('load', done, { once: true });
+                    img.addEventListener('error', done, { once: true });
+                    img.src = heatmapImageUrl(countsParam);
+                });
+            }
+
+            function loadVisibleCardHeatmaps()
+            {
+                if (!cardHeatmapsEnabled)
+                {
+                    return Promise.resolve();
+                }
+
+                const images = Array.from(userGrid.querySelectorAll('img.user-card-heatmap[data-heatmap-counts]:not([data-heatmap-loaded])'));
+                if (images.length === 0)
+                {
+                    return Promise.resolve();
+                }
+
+                let cursor = 0;
+                const workerCount = Math.min(cardHeatmapLoadConcurrency, images.length);
+
+                async function worker()
+                {
+                    while (cursor < images.length)
+                    {
+                        const img = images[cursor];
+                        cursor += 1;
+                        await assignHeatmapSrcAsync(img);
+                    }
+                }
+
+                const workers = [];
+                for (let index = 0; index < workerCount; index++)
+                {
+                    workers.push(worker());
+                }
+
+                return Promise.all(workers);
+            }
+
+            function queueVisibleCardHeatmapLoads()
+            {
+                cardHeatmapLoadQueue = cardHeatmapLoadQueue
+                    .then(function ()
+                    {
+                        return loadVisibleCardHeatmaps();
+                    })
+                    .catch(function ()
+                    {
+                        return undefined;
+                    });
+
+                return cardHeatmapLoadQueue;
+            }
+
+            function enableCardHeatmaps()
+            {
+                if (cardHeatmapsEnabled)
+                {
+                    return queueVisibleCardHeatmapLoads();
+                }
+
+                cardHeatmapsEnabled = true;
+                return queueVisibleCardHeatmapLoads();
+            }
+
+            function disableCardHeatmaps()
+            {
+                cardHeatmapsEnabled = false;
+                cardHeatmapLoadQueue = Promise.resolve();
+
+                for (const img of userGrid.querySelectorAll('img.user-card-heatmap'))
+                {
+                    img.removeAttribute('src');
+                    delete img.dataset.heatmapLoaded;
+                }
+            }
+
+            function renderUserCardHeatmap(username, days)
+            {
+                return '<div class="user-card-heatmap-wrap">'
+                    + '<img class="user-card-heatmap" data-heatmap-counts="' + escapeHtml(heatmapCountsParam(days)) + '"'
+                    + ' width="' + cardHeatmapWidth + '" height="' + cardHeatmapHeight + '"'
+                    + ' alt="" decoding="async">'
+                    + renderUserCardHeatmapTodayOverlay(days)
+                    + '</div>';
             }
 
             function createVisibilityButton(isHidden, label)
@@ -936,11 +1266,12 @@ if (mithra_action_is('user_detail')) {
             function buildUserCardElement(user)
             {
                 const days = Array.isArray(user.days) ? user.days : [];
+                const username = String(user.username || '');
                 const card = document.createElement('article');
                 card.className = 'user-card';
                 card.innerHTML = '<h3 class="user-card-name">' + escapeHtml(user.username || '') + '</h3>'
                     + '<div class="user-card-body">'
-                    + renderHeatmap(days)
+                    + renderUserCardHeatmap(username, days)
                     + renderUserCardStats(days)
                     + '</div>';
                 bindUserCard(card, user);
@@ -989,6 +1320,8 @@ if (mithra_action_is('user_detail')) {
                 options = options || {};
                 const skipHiddenList = !!options.skipHiddenList;
 
+                hidingUserKeys.clear();
+                fadingCards.clear();
                 userGrid.innerHTML = '';
 
                 for (const user of overviewUsers)
@@ -1006,18 +1339,81 @@ if (mithra_action_is('user_detail')) {
                 {
                     renderHiddenUsersList();
                 }
+
+                queueVisibleCardHeatmapLoads();
             }
 
-            async function persistHiddenState(username, hidden)
+            function hiddenUsernamesForPersist()
             {
-                const response = await fetch('index.php?action=save_hidden', {
+                const hiddenNames = [];
+                for (const user of overviewUsers)
+                {
+                    const username = String(user.username || '');
+                    if (username !== '' && isUserHidden(username))
+                    {
+                        hiddenNames.push(username);
+                    }
+                }
+
+                hiddenNames.sort(function (a, b)
+                {
+                    return a.localeCompare(b, 'nl', { sensitivity: 'base' });
+                });
+
+                return hiddenNames;
+            }
+
+            function schedulePersistHidden()
+            {
+                hiddenPersistDirty = true;
+                window.clearTimeout(hiddenPersistTimer);
+                hiddenPersistTimer = window.setTimeout(function ()
+                {
+                    flushHiddenState();
+                }, 200);
+            }
+
+            async function flushHiddenState()
+            {
+                window.clearTimeout(hiddenPersistTimer);
+                hiddenPersistTimer = null;
+
+                if (!hiddenPersistDirty || hiddenPersistInFlight)
+                {
+                    return;
+                }
+
+                hiddenPersistDirty = false;
+                hiddenPersistInFlight = true;
+
+                try
+                {
+                    await persistHiddenList(hiddenUsernamesForPersist());
+                }
+                catch (error)
+                {
+                    hiddenPersistDirty = true;
+                    showError(error.message || 'Zichtbaarheid opslaan mislukt.');
+                }
+                finally
+                {
+                    hiddenPersistInFlight = false;
+                    if (hiddenPersistDirty)
+                    {
+                        schedulePersistHidden();
+                    }
+                }
+            }
+
+            async function persistHiddenList(hiddenList)
+            {
+                const response = await fetch('index.php?action=save_hidden_list', {
                     method: 'POST',
                     headers: { 'Accept': 'application/json' },
                     credentials: 'same-origin',
                     body: new URLSearchParams({
                         company: selectedCompany(),
-                        username: username,
-                        hidden: hidden ? '1' : '0'
+                        hidden_usernames: JSON.stringify(hiddenList)
                     })
                 });
 
@@ -1027,13 +1423,13 @@ if (mithra_action_is('user_detail')) {
                     throw new Error((payload && payload.error) || 'Zichtbaarheid opslaan mislukt.');
                 }
 
-                setHiddenUsernames(payload.hidden_usernames || []);
                 return payload;
             }
 
-            async function hideUserCard(username)
+            function hideUserCard(username)
             {
-                if (visibilityAnimating || isUserHidden(username))
+                const key = usernameKey(username);
+                if (isUserHidden(username) || hidingUserKeys.has(key))
                 {
                     return;
                 }
@@ -1044,60 +1440,50 @@ if (mithra_action_is('user_detail')) {
                     return;
                 }
 
-                visibilityAnimating = true;
-                const previousHidden = new Set(hiddenUsernames);
-
-                try
-                {
-                    await fadeOutCard(card);
-                    hiddenUsernames.add(usernameKey(username));
-                    renderVisibleUserGrid();
-                    await persistHiddenState(username, true);
-                }
-                catch (error)
-                {
-                    hiddenUsernames = previousHidden;
-                    showError(error.message || 'Verbergen mislukt.');
-                    renderVisibleUserGrid();
-                }
-                finally
-                {
-                    visibilityAnimating = false;
-                }
+                hiddenUsernames.add(key);
+                renderHiddenUsersList();
+                fadeOutAndRemoveCard(card, username);
+                schedulePersistHidden();
             }
 
-            async function showUserCard(username)
+            function showUserCard(username)
             {
-                if (visibilityAnimating || !isUserHidden(username) || !findOverviewUser(username))
+                const key = usernameKey(username);
+                if (!isUserHidden(username) || !findOverviewUser(username))
                 {
                     return;
                 }
 
-                visibilityAnimating = true;
-                const previousHidden = new Set(hiddenUsernames);
+                cancelCardFade(username);
 
-                try
+                hiddenUsernames.delete(key);
+                renderHiddenUsersList();
+
+                const user = findOverviewUser(username);
+                const card = buildUserCardElement(user);
+                const insertBefore = findInsertBeforeElement(username);
+                if (insertBefore)
                 {
-                    await persistHiddenState(username, false);
-                    renderVisibleUserGrid();
+                    userGrid.insertBefore(card, insertBefore);
                 }
-                catch (error)
+                else
                 {
-                    hiddenUsernames = previousHidden;
-                    showError(error.message || 'Tonen mislukt.');
-                    renderVisibleUserGrid();
+                    userGrid.appendChild(card);
                 }
-                finally
-                {
-                    visibilityAnimating = false;
-                }
+
+                schedulePersistHidden();
+                queueVisibleCardHeatmapLoads();
             }
 
-            function renderOverview(payload)
+            function renderOverview(payload, options)
             {
+                options = options || {};
                 heatmapIntensityMax = Number(payload.heatmap_intensity_max || heatmapIntensityMax);
                 overviewUsers = Array.isArray(payload.users) ? payload.users : [];
-                setHiddenUsernames(payload.hidden_usernames || []);
+                if (!options.keepHiddenState)
+                {
+                    setHiddenUsernames(payload.hidden_usernames || []);
+                }
 
                 if (overviewUsers.length === 0)
                 {
@@ -1182,6 +1568,33 @@ if (mithra_action_is('user_detail')) {
                 return 'level-1';
             }
 
+            function heatmapLimitHighlightRgb(count, max)
+            {
+                const value = Number(count || 0);
+                const limit = Number(max || 0);
+                if (value < limit || limit <= 0)
+                {
+                    return null;
+                }
+
+                const from = [255, 255, 0];
+                const to = [255, 136, 0];
+                const cap = limit * heatmapOverLimitMultiplier;
+                if (value >= cap)
+                {
+                    return to;
+                }
+
+                const range = cap - limit;
+                const ratio = range > 0 ? ((value - limit) / range) : 1;
+
+                return [
+                    Math.round(from[0] + ((to[0] - from[0]) * ratio)),
+                    Math.round(from[1] + ((to[1] - from[1]) * ratio)),
+                    Math.round(from[2] + ((to[2] - from[2]) * ratio))
+                ];
+            }
+
             function computeUserCardStats(days)
             {
                 const list = Array.isArray(days) ? days : [];
@@ -1241,11 +1654,28 @@ if (mithra_action_is('user_detail')) {
                     }
 
                     const count = Number(day.count || 0);
-                    const level = heatLevel(count, heatmapIntensityMax);
                     const activityLabel = count === 1 ? '1 activiteit' : (count + ' activiteiten');
                     const title = formatDutchDate(day.date) + ' — ' + activityLabel;
-                    const medal = level === 'level-over' ? '<span class="heat-cell-medal" aria-hidden="true">⭐</span>' : '';
-                    html += '<div class="heat-cell ' + level + todayClass + '" title="' + escapeHtml(title) + '">' + medal + '</div>';
+                    const highlightRgb = heatmapLimitHighlightRgb(count, heatmapIntensityMax);
+                    let level = '';
+                    let styleAttr = '';
+                    let medal = '';
+
+                    if (highlightRgb)
+                    {
+                        level = count > heatmapIntensityMax ? 'level-over' : 'level-highlight';
+                        styleAttr = ' style="background:rgb(' + highlightRgb.join(',') + ')"';
+                        if (count > heatmapIntensityMax)
+                        {
+                            medal = '<span class="heat-cell-medal" aria-hidden="true">⭐</span>';
+                        }
+                    }
+                    else
+                    {
+                        level = heatLevel(count, heatmapIntensityMax);
+                    }
+
+                    html += '<div class="heat-cell ' + level + todayClass + '"' + styleAttr + ' title="' + escapeHtml(title) + '">' + medal + '</div>';
                 }
                 html += '</div>';
                 return html;
@@ -1403,6 +1833,8 @@ if (mithra_action_is('user_detail')) {
 
             async function fetchOverview()
             {
+                await flushHiddenState();
+
                 const company = selectedCompany();
                 const response = await fetch('index.php?action=overview', {
                     method: 'POST',
@@ -1417,7 +1849,7 @@ if (mithra_action_is('user_detail')) {
                     throw new Error((payload && payload.error) || 'Overzicht laden mislukt.');
                 }
 
-                renderOverview(payload);
+                renderOverview(payload, { keepHiddenState: hiddenPersistDirty });
                 return payload;
             }
 
@@ -1463,6 +1895,7 @@ if (mithra_action_is('user_detail')) {
                 }
 
                 isSyncing = true;
+                disableCardHeatmaps();
                 showError('');
 
                 const company = selectedCompany();
@@ -1534,6 +1967,7 @@ if (mithra_action_is('user_detail')) {
                 finally
                 {
                     isSyncing = false;
+                    enableCardHeatmaps();
                 }
             }
 
@@ -1570,6 +2004,20 @@ if (mithra_action_is('user_detail')) {
                 {
                     closeModal();
                 }
+            });
+
+            window.addEventListener('beforeunload', function ()
+            {
+                if (!hiddenPersistDirty)
+                {
+                    return;
+                }
+
+                const body = new URLSearchParams({
+                    company: selectedCompany(),
+                    hidden_usernames: JSON.stringify(hiddenUsernamesForPersist())
+                });
+                navigator.sendBeacon('index.php?action=save_hidden_list', body);
             });
 
             fetchOverview()
