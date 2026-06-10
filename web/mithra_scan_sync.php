@@ -636,28 +636,7 @@ function mithra_overview_payload(string $company): array
         ];
     }
 
-    usort($users, static function (array $a, array $b): int {
-        $sumA = 0;
-        foreach ($a['days'] as $day) {
-            if (!empty($day['future'])) {
-                continue;
-            }
-            $sumA += (int) ($day['count'] ?? 0);
-        }
-        $sumB = 0;
-        foreach ($b['days'] as $day) {
-            if (!empty($day['future'])) {
-                continue;
-            }
-            $sumB += (int) ($day['count'] ?? 0);
-        }
-
-        if ($sumA !== $sumB) {
-            return $sumB <=> $sumA;
-        }
-
-        return strcasecmp((string) ($a['username'] ?? ''), (string) ($b['username'] ?? ''));
-    });
+    usort($users, 'mithra_heatmap_compare_users_by_activity');
 
     return [
         'ok' => true,

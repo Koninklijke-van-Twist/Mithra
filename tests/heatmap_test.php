@@ -52,3 +52,25 @@ mithra_test('heatmap telt scans per dag', static function (): void {
     mithra_assert_same(2, (int) ($byDate['2026-06-01']['count'] ?? 0));
     mithra_assert_same(1, (int) ($byDate['2026-06-02']['count'] ?? 0));
 });
+
+mithra_test('activiteit 28 dagen telt alleen verstreken dagen', static function (): void {
+    $days = [
+        ['future' => false, 'count' => 5],
+        ['future' => true, 'count' => 99],
+        ['future' => false, 'count' => 3],
+    ];
+    mithra_assert_same(8, mithra_heatmap_activity_total($days));
+});
+
+mithra_test('overview sorteert gebruikers op 28-dagen activiteit aflopend', static function (): void {
+    $users = [
+        ['username' => 'BOB', 'days' => [['future' => false, 'count' => 10]]],
+        ['username' => 'ALICE', 'days' => [['future' => false, 'count' => 50]]],
+        ['username' => 'CAROL', 'days' => [['future' => false, 'count' => 50]]],
+    ];
+    usort($users, 'mithra_heatmap_compare_users_by_activity');
+
+    mithra_assert_same('ALICE', $users[0]['username']);
+    mithra_assert_same('CAROL', $users[1]['username']);
+    mithra_assert_same('BOB', $users[2]['username']);
+});

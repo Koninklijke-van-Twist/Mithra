@@ -30,7 +30,7 @@ const MITHRA_HEATMAP_CELL_RADIUS = 2;
 const MITHRA_MODAL_HEATMAP_ROWS = 50;
 
 /** Bovengrens voor blauwe intensiteit; hogere waarden worden geel weergegeven. */
-const MITHRA_HEATMAP_INTENSITY_MAX = 100;
+const MITHRA_HEATMAP_INTENSITY_MAX = 500;
 
 /** Op/ boven limiet: PNG loopt van oranje (#FF8800) naar geel (#FFFF00) tot dit veelvoud. */
 const MITHRA_HEATMAP_OVER_LIMIT_MULTIPLIER = 5;

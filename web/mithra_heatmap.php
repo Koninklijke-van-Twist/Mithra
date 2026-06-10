@@ -139,6 +139,31 @@ function mithra_heatmap_build_grid_days(array $countsByDate, string $today = '',
     return $days;
 }
 
+function mithra_heatmap_activity_total(array $days): int
+{
+    $total = 0;
+    foreach ($days as $day) {
+        if (!empty($day['future'])) {
+            continue;
+        }
+        $total += (int) ($day['count'] ?? 0);
+    }
+
+    return $total;
+}
+
+function mithra_heatmap_compare_users_by_activity(array $a, array $b): int
+{
+    $sumA = mithra_heatmap_activity_total($a['days'] ?? []);
+    $sumB = mithra_heatmap_activity_total($b['days'] ?? []);
+
+    if ($sumA !== $sumB) {
+        return $sumB <=> $sumA;
+    }
+
+    return strcasecmp((string) ($a['username'] ?? ''), (string) ($b['username'] ?? ''));
+}
+
 function mithra_heatmap_png_dimensions(?int $rows = null, ?int $cols = null, ?int $cellPx = null, ?int $gapPx = null): array
 {
     $rowCount = mithra_heatmap_grid_rows($rows);

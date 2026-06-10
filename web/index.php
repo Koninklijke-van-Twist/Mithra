@@ -61,6 +61,8 @@ function mithra_validate_company(string $company, array $companies): void
 $companies = mithra_discover_companies();
 $selectedCompany = mithra_selected_company($companies);
 $cardHeatmapDims = mithra_heatmap_card_display_dimensions();
+$modalHeatmapDims = mithra_heatmap_png_dimensions(MITHRA_MODAL_HEATMAP_ROWS);
+$modalShellHeight = (int) $modalHeatmapDims['height'] + 52 + 36;
 $cacheWidget = injectTimerHtml([
     'title' => 'OData cache',
     'label' => 'Cache',
@@ -166,23 +168,6 @@ if (mithra_action_is('overview')) {
         mithra_send_json($payload);
     } catch (Throwable $error) {
         mithra_runtime_error_payload($error, 'Overzicht laden mislukt.');
-    }
-}
-
-if (mithra_action_is('heatmap_png')) {
-    $countsRaw = trim((string) ($_GET['counts'] ?? $_POST['counts'] ?? ''));
-    $intensityMax = (int) ($_GET['max'] ?? $_POST['max'] ?? MITHRA_HEATMAP_INTENSITY_MAX);
-    if ($intensityMax <= 0) {
-        $intensityMax = MITHRA_HEATMAP_INTENSITY_MAX;
-    }
-
-    try {
-        mithra_heatmap_send_counts_png($countsRaw, $intensityMax);
-    } catch (Throwable $error) {
-        http_response_code(500);
-        header('Content-Type: text/plain; charset=utf-8');
-        echo 'Heatmap laden mislukt.';
-        exit;
     }
 }
 
@@ -553,31 +538,37 @@ if (mithra_action_is('user_detail')) {
             font-variant-numeric: tabular-nums;
         }
 
-        .user-card-heatmap-wrap {
-            position: relative;
+        .heatmap-svg {
+            display: block;
+            overflow: visible;
+        }
+
+        .user-card-heatmap-svg {
             width: <?= (int) $cardHeatmapDims['width'] ?>px;
             height: <?= (int) $cardHeatmapDims['height'] ?>px;
         }
 
-        .user-card-heatmap {
-            display: block;
-            width: 100%;
-            height: 100%;
-            image-rendering: pixelated;
-            image-rendering: crisp-edges;
-            background: var(--heat-empty);
+        .modal-heatmap-svg {
+            width: <?= (int) $modalHeatmapDims['width'] ?>px;
+            height: <?= (int) $modalHeatmapDims['height'] ?>px;
+            max-width: 100%;
         }
 
-        .user-card-heatmap[data-heatmap-loaded="1"] {
-            background: transparent;
+        .modal-heatmap-placeholder {
+            width: <?= (int) $modalHeatmapDims['width'] ?>px;
+            height: <?= (int) $modalHeatmapDims['height'] ?>px;
+            max-width: 100%;
+            border-radius: 4px;
+            background: linear-gradient(180deg, #f7fbff 0%, #eef6fc 100%);
         }
 
-        .user-card-heatmap-today {
-            position: absolute;
-            box-sizing: border-box;
-            border: 1px solid rgb(230, 152, 152);
-            border-radius: 2px;
-            pointer-events: none;
+        .modal-heatmap-panel[aria-busy="true"] .modal-heatmap-placeholder {
+            animation: modal-heatmap-pulse 1.2s ease-in-out infinite;
+        }
+
+        @keyframes modal-heatmap-pulse {
+            0%, 100% { opacity: 0.72; }
+            50% { opacity: 1; }
         }
 
         .heatmap {
@@ -678,6 +669,7 @@ if (mithra_action_is('user_detail')) {
 
         .modal {
             width: min(1120px, 100%);
+            height: <?= (int) $modalShellHeight ?>px;
             max-height: calc(100vh - 32px);
             overflow: hidden;
             display: flex;
@@ -688,19 +680,27 @@ if (mithra_action_is('user_detail')) {
             padding: 18px;
         }
 
+        #modalContent {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
         .modal-body {
             display: flex;
             align-items: flex-start;
             gap: 18px;
             flex: 1 1 auto;
             min-height: 0;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
         }
 
         .modal-main {
             flex: 1 1 auto;
             min-width: 0;
-            max-height: calc(100vh - 120px);
-            overflow-y: auto;
             padding-right: 4px;
         }
 
@@ -740,6 +740,12 @@ if (mithra_action_is('user_detail')) {
             height: 34px;
             cursor: pointer;
             font-size: 1rem;
+        }
+
+        .modal-loading {
+            margin: 24px 0;
+            font-size: 0.95rem;
+            color: var(--muted);
         }
 
         .stats-section {
@@ -821,8 +827,11 @@ if (mithra_action_is('user_detail')) {
                 flex-direction: column;
             }
 
+            .modal-main {
+                flex: 0 0 auto;
+            }
+
             .modal-heatmap-panel {
-                position: static;
                 width: 100%;
             }
         }
@@ -908,15 +917,14 @@ if (mithra_action_is('user_detail')) {
 
             let heatmapIntensityMax = <?= (int) MITHRA_HEATMAP_INTENSITY_MAX ?>;
             const heatmapOverLimitMultiplier = <?= (int) MITHRA_HEATMAP_OVER_LIMIT_MULTIPLIER ?>;
-            const cardHeatmapCellCount = <?= (int) (MITHRA_HEATMAP_ROWS * MITHRA_HEATMAP_COLS) ?>;
-            const cardHeatmapLoadConcurrency = 6;
-            let cardHeatmapsEnabled = false;
-            let cardHeatmapLoadQueue = Promise.resolve();
-            const cardHeatmapWidth = <?= (int) $cardHeatmapDims['width'] ?>;
-            const cardHeatmapHeight = <?= (int) $cardHeatmapDims['height'] ?>;
             const cardHeatmapCellPx = <?= (int) MITHRA_HEATMAP_CELL_PX ?>;
             const cardHeatmapCellGap = <?= (int) MITHRA_HEATMAP_CELL_GAP ?>;
             const cardHeatmapCols = <?= (int) MITHRA_HEATMAP_COLS ?>;
+            const cardHeatmapRows = <?= (int) MITHRA_HEATMAP_ROWS ?>;
+            const modalHeatmapRows = <?= (int) MITHRA_MODAL_HEATMAP_ROWS ?>;
+            const heatmapSvgPad = 1;
+            let modalHeatmapRenderToken = 0;
+            let modalFetchController = null;
             let isSyncing = false;
             let overviewUsers = [];
             let hiddenUsernames = new Set();
@@ -1067,170 +1075,134 @@ if (mithra_action_is('user_detail')) {
                 });
             }
 
-            function heatmapTodayCellIndex(days)
+            function heatCellFillColor(count, future)
             {
-                const todayKey = todayDateKey();
+                if (future)
+                {
+                    return 'rgb(246, 247, 249)';
+                }
+
+                const highlightRgb = heatmapLimitHighlightRgb(count, heatmapIntensityMax);
+                if (highlightRgb)
+                {
+                    return 'rgb(' + highlightRgb.join(',') + ')';
+                }
+
+                const level = heatLevel(count, heatmapIntensityMax);
+                switch (level)
+                {
+                    case 'level-1':
+                        return 'rgba(0, 153, 204, 0.22)';
+                    case 'level-2':
+                        return 'rgba(0, 153, 204, 0.42)';
+                    case 'level-3':
+                        return 'rgba(0, 153, 204, 0.62)';
+                    case 'level-4':
+                        return 'rgba(0, 153, 204, 0.82)';
+                    case 'level-max':
+                        return 'rgb(0, 153, 204)';
+                    default:
+                        return 'rgb(235, 237, 240)';
+                }
+            }
+
+            function heatCellStrokeColor(future, isToday)
+            {
+                if (isToday)
+                {
+                    return 'rgb(230, 152, 152)';
+                }
+
+                if (future)
+                {
+                    return 'rgba(0, 0, 0, 0.03)';
+                }
+
+                return 'rgba(0, 0, 0, 0.04)';
+            }
+
+            function heatCellTitle(day)
+            {
+                if (day.future)
+                {
+                    return formatDutchDate(day.date) + ' — nog niet bereikt';
+                }
+
+                const count = Number(day.count || 0);
+                const activityLabel = count === 1 ? '1 activiteit' : (count + ' activiteiten');
+                return formatDutchDate(day.date) + ' — ' + activityLabel;
+            }
+
+            function heatmapSvgDimensions(rows, cols, cellPx, gapPx)
+            {
+                return {
+                    width: (cols * cellPx) + (Math.max(0, cols - 1) * gapPx),
+                    height: (rows * cellPx) + (Math.max(0, rows - 1) * gapPx),
+                    rows: rows,
+                    cols: cols,
+                    cellPx: cellPx,
+                    gapPx: gapPx
+                };
+            }
+
+            function renderHeatmapSvg(days, options)
+            {
+                options = options || {};
                 const list = Array.isArray(days) ? days : [];
+                const cols = Number(options.cols || cardHeatmapCols) || cardHeatmapCols;
+                const rows = Number(options.rows || Math.ceil(list.length / cols)) || cardHeatmapRows;
+                const cellPx = Number(options.cellPx || cardHeatmapCellPx) || cardHeatmapCellPx;
+                const gapPx = Number(options.gapPx || cardHeatmapCellGap);
+                const extraClass = String(options.extraClass || '').trim();
+                const dims = heatmapSvgDimensions(rows, cols, cellPx, gapPx);
+                const todayKey = todayDateKey();
+                const pad = heatmapSvgPad;
+                let shapes = '';
+
                 for (let index = 0; index < list.length; index++)
                 {
-                    if (String(list[index].date || '') === todayKey)
-                    {
-                        return index;
-                    }
-                }
-
-                return -1;
-            }
-
-            function renderUserCardHeatmapTodayOverlay(days)
-            {
-                const index = heatmapTodayCellIndex(days);
-                if (index < 0)
-                {
-                    return '';
-                }
-
-                const col = index % cardHeatmapCols;
-                const row = Math.floor(index / cardHeatmapCols);
-                const left = col * (cardHeatmapCellPx + cardHeatmapCellGap);
-                const top = row * (cardHeatmapCellPx + cardHeatmapCellGap);
-
-                return '<span class="user-card-heatmap-today" style="left:' + left + 'px;top:' + top + 'px;width:'
-                    + cardHeatmapCellPx + 'px;height:' + cardHeatmapCellPx + 'px"></span>';
-            }
-
-            function heatmapCountsParam(days)
-            {
-                const list = Array.isArray(days) ? days : [];
-                const values = [];
-                for (let index = 0; index < cardHeatmapCellCount; index++)
-                {
                     const day = list[index] || {};
-                    if (day.future)
-                    {
-                        values.push(-1);
-                        continue;
-                    }
+                    const col = index % cols;
+                    const row = Math.floor(index / cols);
+                    const x = col * (cellPx + gapPx);
+                    const y = row * (cellPx + gapPx);
+                    const future = !!day.future;
+                    const count = Number(day.count || 0);
+                    const isToday = String(day.date || '') === todayKey;
+                    const fill = heatCellFillColor(count, future);
+                    const stroke = heatCellStrokeColor(future, isToday);
+                    const title = heatCellTitle(day);
 
-                    values.push(Number(day.count || 0));
+                    shapes += '<rect x="' + x + '" y="' + y + '" width="' + cellPx + '" height="' + cellPx + '" rx="2"'
+                        + ' fill="' + fill + '" stroke="' + stroke + '">'
+                        + '<title>' + escapeHtml(title) + '</title>'
+                        + '</rect>';
+
+                    if (!future && count > heatmapIntensityMax)
+                    {
+                        const centerX = x + (cellPx / 2);
+                        const centerY = y + (cellPx / 2) + 1;
+                        shapes += '<text x="' + centerX + '" y="' + centerY + '" text-anchor="middle" dominant-baseline="middle"'
+                            + ' font-size="10" pointer-events="none" aria-hidden="true">⭐</text>';
+                    }
                 }
 
-                return values.join(',');
+                const className = 'heatmap-svg' + (extraClass !== '' ? (' ' + extraClass) : '');
+
+                return '<svg class="' + className + '" width="' + dims.width + '" height="' + dims.height + '"'
+                    + ' viewBox="' + (-pad) + ' ' + (-pad) + ' ' + (dims.width + (pad * 2)) + ' ' + (dims.height + (pad * 2)) + '"'
+                    + ' role="img" aria-hidden="true">'
+                    + shapes
+                    + '</svg>';
             }
 
-            function heatmapImageUrl(countsParam)
+            function renderUserCardHeatmap(days)
             {
-                const params = new URLSearchParams({
-                    action: 'heatmap_png',
-                    counts: String(countsParam || ''),
-                    max: String(heatmapIntensityMax)
+                return renderHeatmapSvg(days, {
+                    cols: cardHeatmapCols,
+                    rows: cardHeatmapRows,
+                    extraClass: 'user-card-heatmap-svg'
                 });
-                return 'index.php?' + params.toString();
-            }
-
-            function assignHeatmapSrcAsync(img)
-            {
-                const countsParam = String(img.getAttribute('data-heatmap-counts') || '');
-                if (countsParam === '')
-                {
-                    return Promise.resolve();
-                }
-
-                return new Promise(function (resolve)
-                {
-                    function done()
-                    {
-                        img.dataset.heatmapLoaded = '1';
-                        resolve();
-                    }
-
-                    img.addEventListener('load', done, { once: true });
-                    img.addEventListener('error', done, { once: true });
-                    img.src = heatmapImageUrl(countsParam);
-                });
-            }
-
-            function loadVisibleCardHeatmaps()
-            {
-                if (!cardHeatmapsEnabled)
-                {
-                    return Promise.resolve();
-                }
-
-                const images = Array.from(userGrid.querySelectorAll('img.user-card-heatmap[data-heatmap-counts]:not([data-heatmap-loaded])'));
-                if (images.length === 0)
-                {
-                    return Promise.resolve();
-                }
-
-                let cursor = 0;
-                const workerCount = Math.min(cardHeatmapLoadConcurrency, images.length);
-
-                async function worker()
-                {
-                    while (cursor < images.length)
-                    {
-                        const img = images[cursor];
-                        cursor += 1;
-                        await assignHeatmapSrcAsync(img);
-                    }
-                }
-
-                const workers = [];
-                for (let index = 0; index < workerCount; index++)
-                {
-                    workers.push(worker());
-                }
-
-                return Promise.all(workers);
-            }
-
-            function queueVisibleCardHeatmapLoads()
-            {
-                cardHeatmapLoadQueue = cardHeatmapLoadQueue
-                    .then(function ()
-                    {
-                        return loadVisibleCardHeatmaps();
-                    })
-                    .catch(function ()
-                    {
-                        return undefined;
-                    });
-
-                return cardHeatmapLoadQueue;
-            }
-
-            function enableCardHeatmaps()
-            {
-                if (cardHeatmapsEnabled)
-                {
-                    return queueVisibleCardHeatmapLoads();
-                }
-
-                cardHeatmapsEnabled = true;
-                return queueVisibleCardHeatmapLoads();
-            }
-
-            function disableCardHeatmaps()
-            {
-                cardHeatmapsEnabled = false;
-                cardHeatmapLoadQueue = Promise.resolve();
-
-                for (const img of userGrid.querySelectorAll('img.user-card-heatmap'))
-                {
-                    img.removeAttribute('src');
-                    delete img.dataset.heatmapLoaded;
-                }
-            }
-
-            function renderUserCardHeatmap(username, days)
-            {
-                return '<div class="user-card-heatmap-wrap">'
-                    + '<img class="user-card-heatmap" data-heatmap-counts="' + escapeHtml(heatmapCountsParam(days)) + '"'
-                    + ' width="' + cardHeatmapWidth + '" height="' + cardHeatmapHeight + '"'
-                    + ' alt="" decoding="async">'
-                    + renderUserCardHeatmapTodayOverlay(days)
-                    + '</div>';
             }
 
             function createVisibilityButton(isHidden, label)
@@ -1263,15 +1235,38 @@ if (mithra_action_is('user_detail')) {
                 card.appendChild(visibilityButton);
             }
 
+            function overviewRankMedal(username)
+            {
+                const key = usernameKey(username);
+                const medals = ['🥇', '🥈', '🥉'];
+
+                for (let rank = 0; rank < overviewUsers.length && rank < medals.length; rank++)
+                {
+                    if (usernameKey(overviewUsers[rank].username) === key)
+                    {
+                        return medals[rank];
+                    }
+                }
+
+                return '';
+            }
+
+            function userDisplayNameWithMedal(username)
+            {
+                const name = String(username || '');
+                const medal = overviewRankMedal(username);
+                return medal === '' ? name : (name + ' ' + medal);
+            }
+
             function buildUserCardElement(user)
             {
                 const days = Array.isArray(user.days) ? user.days : [];
                 const username = String(user.username || '');
                 const card = document.createElement('article');
                 card.className = 'user-card';
-                card.innerHTML = '<h3 class="user-card-name">' + escapeHtml(user.username || '') + '</h3>'
+                card.innerHTML = '<h3 class="user-card-name">' + escapeHtml(userDisplayNameWithMedal(username)) + '</h3>'
                     + '<div class="user-card-body">'
-                    + renderUserCardHeatmap(username, days)
+                    + renderUserCardHeatmap(days)
                     + renderUserCardStats(days)
                     + '</div>';
                 bindUserCard(card, user);
@@ -1339,8 +1334,6 @@ if (mithra_action_is('user_detail')) {
                 {
                     renderHiddenUsersList();
                 }
-
-                queueVisibleCardHeatmapLoads();
             }
 
             function hiddenUsernamesForPersist()
@@ -1472,7 +1465,6 @@ if (mithra_action_is('user_detail')) {
                 }
 
                 schedulePersistHidden();
-                queueVisibleCardHeatmapLoads();
             }
 
             function renderOverview(payload, options)
@@ -1634,61 +1626,120 @@ if (mithra_action_is('user_detail')) {
                     + '</div>';
             }
 
-            function renderHeatmap(days, options)
+            function renderModalBodyHtml(mainHtml)
             {
-                options = options || {};
-                const cols = Number(options.cols || <?= (int) MITHRA_HEATMAP_COLS ?>) || <?= (int) MITHRA_HEATMAP_COLS ?>;
-                const extraClass = String(options.extraClass || '').trim();
-                const todayKey = todayDateKey();
-                let html = '<div class="heatmap' + (extraClass !== '' ? (' ' + extraClass) : '') + '" style="grid-template-columns:repeat(' + cols + ', 14px)">';
-                for (const day of days)
-                {
-                    const isToday = String(day.date || '') === todayKey;
-                    const todayClass = isToday ? ' today' : '';
-
-                    if (day.future)
-                    {
-                        const futureTitle = formatDutchDate(day.date) + ' — nog niet bereikt';
-                        html += '<div class="heat-cell future' + todayClass + '" title="' + escapeHtml(futureTitle) + '"></div>';
-                        continue;
-                    }
-
-                    const count = Number(day.count || 0);
-                    const activityLabel = count === 1 ? '1 activiteit' : (count + ' activiteiten');
-                    const title = formatDutchDate(day.date) + ' — ' + activityLabel;
-                    const highlightRgb = heatmapLimitHighlightRgb(count, heatmapIntensityMax);
-                    let level = '';
-                    let styleAttr = '';
-                    let medal = '';
-
-                    if (highlightRgb)
-                    {
-                        level = count > heatmapIntensityMax ? 'level-over' : 'level-highlight';
-                        styleAttr = ' style="background:rgb(' + highlightRgb.join(',') + ')"';
-                        if (count > heatmapIntensityMax)
-                        {
-                            medal = '<span class="heat-cell-medal" aria-hidden="true">⭐</span>';
-                        }
-                    }
-                    else
-                    {
-                        level = heatLevel(count, heatmapIntensityMax);
-                    }
-
-                    html += '<div class="heat-cell ' + level + todayClass + '"' + styleAttr + ' title="' + escapeHtml(title) + '">' + medal + '</div>';
-                }
-                html += '</div>';
-                return html;
+                return '<div class="modal-body">'
+                    + '<div class="modal-main">' + mainHtml + '</div>'
+                    + renderModalHeatmapPanelPlaceholder()
+                    + '</div>';
             }
 
-            function renderModalHeatmapPanel(payload)
+            function renderModalHeatmapPanelPlaceholder()
             {
-                const days = Array.isArray(payload.heatmap_days) ? payload.heatmap_days : [];
-                const rows = Number(payload.heatmap_rows || <?= (int) MITHRA_MODAL_HEATMAP_ROWS ?>);
-                const cols = Number(payload.heatmap_cols || <?= (int) MITHRA_HEATMAP_COLS ?>);
-                return '<aside class="modal-heatmap-panel">'
-                    + renderHeatmap(days, { cols: cols })
+                return '<aside class="modal-heatmap-panel" aria-busy="true">'
+                    + '<div class="modal-heatmap-placeholder" aria-hidden="true"></div>'
                     + '</aside>';
+            }
+
+            function appendHeatmapCellToSvg(svg, day, index, cols, cellPx, gapPx, todayKey)
+            {
+                const svgNs = 'http://www.w3.org/2000/svg';
+                const col = index % cols;
+                const row = Math.floor(index / cols);
+                const x = col * (cellPx + gapPx);
+                const y = row * (cellPx + gapPx);
+                const future = !!day.future;
+                const count = Number(day.count || 0);
+                const isToday = String(day.date || '') === todayKey;
+
+                const rect = document.createElementNS(svgNs, 'rect');
+                rect.setAttribute('x', String(x));
+                rect.setAttribute('y', String(y));
+                rect.setAttribute('width', String(cellPx));
+                rect.setAttribute('height', String(cellPx));
+                rect.setAttribute('rx', '2');
+                rect.setAttribute('fill', heatCellFillColor(count, future));
+                rect.setAttribute('stroke', heatCellStrokeColor(future, isToday));
+
+                const title = document.createElementNS(svgNs, 'title');
+                title.textContent = heatCellTitle(day);
+                rect.appendChild(title);
+                svg.appendChild(rect);
+
+                if (!future && count > heatmapIntensityMax)
+                {
+                    const text = document.createElementNS(svgNs, 'text');
+                    text.setAttribute('x', String(x + (cellPx / 2)));
+                    text.setAttribute('y', String(y + (cellPx / 2) + 1));
+                    text.setAttribute('text-anchor', 'middle');
+                    text.setAttribute('dominant-baseline', 'middle');
+                    text.setAttribute('font-size', '10');
+                    text.setAttribute('pointer-events', 'none');
+                    text.setAttribute('aria-hidden', 'true');
+                    text.textContent = '⭐';
+                    svg.appendChild(text);
+                }
+            }
+
+            function mountHeatmapSvgAsync(panel, days, options)
+            {
+                if (!panel)
+                {
+                    return;
+                }
+
+                const token = ++modalHeatmapRenderToken;
+                const list = Array.isArray(days) ? days : [];
+                options = options || {};
+                const cols = Number(options.cols || cardHeatmapCols) || cardHeatmapCols;
+                const rows = Number(options.rows || Math.ceil(list.length / cols)) || cardHeatmapRows;
+                const cellPx = Number(options.cellPx || cardHeatmapCellPx) || cardHeatmapCellPx;
+                const gapPx = Number(options.gapPx || cardHeatmapCellGap);
+                const extraClass = String(options.extraClass || '').trim();
+                const dims = heatmapSvgDimensions(rows, cols, cellPx, gapPx);
+                const pad = heatmapSvgPad;
+                const todayKey = todayDateKey();
+                const svgNs = 'http://www.w3.org/2000/svg';
+                const className = 'heatmap-svg' + (extraClass !== '' ? (' ' + extraClass) : '');
+                const svg = document.createElementNS(svgNs, 'svg');
+
+                svg.setAttribute('class', className);
+                svg.setAttribute('width', String(dims.width));
+                svg.setAttribute('height', String(dims.height));
+                svg.setAttribute('viewBox', (-pad) + ' ' + (-pad) + ' ' + (dims.width + (pad * 2)) + ' ' + (dims.height + (pad * 2)));
+                svg.setAttribute('role', 'img');
+                svg.setAttribute('aria-hidden', 'true');
+
+                panel.innerHTML = '';
+                panel.appendChild(svg);
+                panel.setAttribute('aria-busy', 'true');
+
+                let index = 0;
+                const cellsPerFrame = 35;
+
+                function appendChunk()
+                {
+                    if (token !== modalHeatmapRenderToken)
+                    {
+                        return;
+                    }
+
+                    const end = Math.min(index + cellsPerFrame, list.length);
+                    for (; index < end; index++)
+                    {
+                        appendHeatmapCellToSvg(svg, list[index] || {}, index, cols, cellPx, gapPx, todayKey);
+                    }
+
+                    if (index < list.length)
+                    {
+                        window.requestAnimationFrame(appendChunk);
+                        return;
+                    }
+
+                    panel.removeAttribute('aria-busy');
+                }
+
+                window.requestAnimationFrame(appendChunk);
             }
 
             function escapeHtml(value)
@@ -1777,10 +1828,25 @@ if (mithra_action_is('user_detail')) {
             function openUserModal(username)
             {
                 const company = selectedCompany();
+
+                if (modalFetchController)
+                {
+                    modalFetchController.abort();
+                }
+
+                modalFetchController = new AbortController();
+                modalHeatmapRenderToken++;
+
+                modalTitle.textContent = userDisplayNameWithMedal(username);
+                modalContent.innerHTML = renderModalBodyHtml('<p class="modal-loading">Gegevens laden…</p>');
+                userModal.classList.add('open');
+                userModal.setAttribute('aria-hidden', 'false');
+
                 fetch('index.php?action=user_detail', {
                     method: 'POST',
                     headers: { 'Accept': 'application/json' },
                     credentials: 'same-origin',
+                    signal: modalFetchController.signal,
                     body: new URLSearchParams({
                         company: company,
                         username: username
@@ -1797,7 +1863,7 @@ if (mithra_action_is('user_detail')) {
                             throw new Error((payload && payload.error) || 'Details laden mislukt.');
                         }
 
-                        modalTitle.textContent = payload.username || username;
+                        modalTitle.textContent = userDisplayNameWithMedal(payload.username || username);
                         heatmapIntensityMax = Number(payload.heatmap_intensity_max || heatmapIntensityMax);
                         let mainHtml = renderStatsBlock('Totaal', payload.overall || {});
                         const processes = Array.isArray(payload.by_process) ? payload.by_process : [];
@@ -1812,21 +1878,44 @@ if (mithra_action_is('user_detail')) {
                             mainHtml += renderStatsBlock(String(block.entry_type || 'Magazijnhandeling'), block.stats || {});
                         }
                         mainHtml += renderChart(payload.chart_30_days_wh || [], 'Magazijnhandelingen afgelopen 28 dagen', 'handelingen');
-                        modalContent.innerHTML = '<div class="modal-body">'
-                            + '<div class="modal-main">' + mainHtml + '</div>'
-                            + renderModalHeatmapPanel(payload)
-                            + '</div>';
-                        userModal.classList.add('open');
-                        userModal.setAttribute('aria-hidden', 'false');
+
+                        const heatmapDays = Array.isArray(payload.heatmap_days) ? payload.heatmap_days : [];
+                        const heatmapRows = Number(payload.heatmap_rows || modalHeatmapRows);
+                        const heatmapCols = Number(payload.heatmap_cols || cardHeatmapCols);
+
+                        modalContent.innerHTML = renderModalBodyHtml(mainHtml);
+                        mountHeatmapSvgAsync(
+                            modalContent.querySelector('.modal-heatmap-panel'),
+                            heatmapDays,
+                            {
+                                cols: heatmapCols,
+                                rows: heatmapRows,
+                                extraClass: 'modal-heatmap-svg'
+                            }
+                        );
                     })
                     .catch(function (error)
                     {
+                        if (error && error.name === 'AbortError')
+                        {
+                            return;
+                        }
+
+                        closeModal();
                         showError(error.message || 'Gebruikersdetails laden mislukt.');
                     });
             }
 
             function closeModal()
             {
+                modalHeatmapRenderToken++;
+
+                if (modalFetchController)
+                {
+                    modalFetchController.abort();
+                    modalFetchController = null;
+                }
+
                 userModal.classList.remove('open');
                 userModal.setAttribute('aria-hidden', 'true');
             }
@@ -1895,7 +1984,6 @@ if (mithra_action_is('user_detail')) {
                 }
 
                 isSyncing = true;
-                disableCardHeatmaps();
                 showError('');
 
                 const company = selectedCompany();
@@ -1967,7 +2055,6 @@ if (mithra_action_is('user_detail')) {
                 finally
                 {
                     isSyncing = false;
-                    enableCardHeatmaps();
                 }
             }
 
