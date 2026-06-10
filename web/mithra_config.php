@@ -6,6 +6,9 @@
 const MITHRA_SCAN_DB_FILENAME = 'mithra_scans.sqlite3';
 const MITHRA_BC_ENTITY = 'Scanposten';
 const MITHRA_BC_SELECT_FIELDS = 'Entry_No,KVT_User_Name_Scanner,Scan_Process,Starting_Date,Starting_Time';
+
+const MITHRA_WH_BC_ENTITY = 'Magazijnposten';
+const MITHRA_WH_BC_SELECT_FIELDS = 'Entry_No,Entry_Type,Quantity,Whse_Document_No,Registering_Date,User_ID';
 const MITHRA_SYNC_CHUNK_DAYS = 7;
 
 /** Stop backfill na dit aantal opeenvolgende maanden zonder scanregels. */

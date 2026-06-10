@@ -28,7 +28,7 @@ function mithra_discover_companies(): array
     return $companies;
 }
 
-function mithra_company_entity_url(string $company, array $query, ?string $environment = null): string
+function mithra_company_entity_url(string $company, array $query, ?string $environment = null, ?string $entity = null): string
 {
     global $baseUrl;
 
@@ -51,9 +51,14 @@ function mithra_company_entity_url(string $company, array $query, ?string $envir
         throw new RuntimeException('baseUrl ontbreekt in auth.php.');
     }
 
+    $entityName = trim((string) ($entity ?? MITHRA_BC_ENTITY));
+    if ($entityName === '') {
+        throw new RuntimeException('BC entity ontbreekt.');
+    }
+
     $safeCompany = str_replace("'", "''", $companyName);
     $companySegment = "Company('" . rawurlencode($safeCompany) . "')";
-    $url = rtrim($base, '/') . '/' . rawurlencode($targetEnvironment) . '/ODataV4/' . $companySegment . '/' . rawurlencode(MITHRA_BC_ENTITY);
+    $url = rtrim($base, '/') . '/' . rawurlencode($targetEnvironment) . '/ODataV4/' . $companySegment . '/' . rawurlencode($entityName);
 
     if ($query !== []) {
         $url .= '?' . http_build_query($query, '', '&', PHP_QUERY_RFC3986);
@@ -224,17 +229,30 @@ function mithra_filter_entries_newer_than(array $entries, string $scanTimestamp)
     return $result;
 }
 
-function mithra_fetch_scanposten_with_filter(string $company, string $filter): array
+function mithra_fetch_entity_with_filter(string $company, string $entity, string $selectFields, string $filter, string $orderBy): array
 {
     $query = [
-        '$select' => MITHRA_BC_SELECT_FIELDS,
+        '$select' => $selectFields,
         '$filter' => $filter,
-        '$orderby' => 'Starting_Date asc,Starting_Time asc,Entry_No asc',
+        '$orderby' => $orderBy,
     ];
 
-    $url = mithra_company_entity_url($company, $query);
+    $url = mithra_company_entity_url($company, $query, null, $entity);
     $auth = auth_get_auth_for_company($company, MITHRA_ODATA_TTL);
     $rows = odata_get_all($url, $auth, MITHRA_ODATA_TTL);
+
+    return is_array($rows) ? $rows : [];
+}
+
+function mithra_fetch_scanposten_with_filter(string $company, string $filter): array
+{
+    $rows = mithra_fetch_entity_with_filter(
+        $company,
+        MITHRA_BC_ENTITY,
+        MITHRA_BC_SELECT_FIELDS,
+        $filter,
+        'Starting_Date asc,Starting_Time asc,Entry_No asc'
+    );
 
     $entries = [];
     foreach ($rows as $row) {
@@ -249,6 +267,211 @@ function mithra_fetch_scanposten_with_filter(string $company, string $filter): a
     }
 
     return $entries;
+}
+
+function mithra_username_from_user_id(string $userId): string
+{
+    $text = trim($userId);
+    if ($text === '') {
+        return '';
+    }
+
+    $at = strpos($text, '@');
+    if ($at === false) {
+        return $text;
+    }
+
+    return trim(substr($text, 0, $at));
+}
+
+function mithra_wh_row_is_activity(array $row): bool
+{
+    $entryType = trim((string) ($row['Entry_Type'] ?? ''));
+    if ($entryType === '') {
+        return false;
+    }
+
+    if (strcasecmp($entryType, 'Verplaatsing') === 0) {
+        return (float) ($row['Quantity'] ?? 0) > 0;
+    }
+
+    if (strcasecmp($entryType, 'Positieve correctie') === 0) {
+        return true;
+    }
+
+    if (strcasecmp($entryType, 'Negatieve Correctie') === 0) {
+        return true;
+    }
+
+    return false;
+}
+
+function mithra_wh_row_activity_timestamp(array $row): string
+{
+    $date = mithra_normalize_date_only((string) ($row['Registering_Date'] ?? ''));
+    if ($date === '') {
+        return '';
+    }
+
+    return $date . 'T00:00:00';
+}
+
+function mithra_wh_row_action_label(array $row): string
+{
+    $entryType = trim((string) ($row['Entry_Type'] ?? ''));
+    $documentNo = trim((string) ($row['Whse_Document_No'] ?? ''));
+    if ($documentNo === '') {
+        return $entryType;
+    }
+
+    return trim($entryType . ' ' . $documentNo);
+}
+
+function mithra_wh_row_to_entry(array $row): ?array
+{
+    if (!mithra_wh_row_is_activity($row)) {
+        return null;
+    }
+
+    $entryNo = (int) ($row['Entry_No'] ?? 0);
+    if ($entryNo <= 0) {
+        return null;
+    }
+
+    $username = mithra_username_from_user_id((string) ($row['User_ID'] ?? ''));
+    if ($username === '') {
+        return null;
+    }
+
+    $activityTimestamp = mithra_wh_row_activity_timestamp($row);
+    if ($activityTimestamp === '') {
+        return null;
+    }
+
+    $entryType = trim((string) ($row['Entry_Type'] ?? ''));
+
+    return [
+        'entry_no' => $entryNo,
+        'username' => $username,
+        'entry_type' => $entryType,
+        'whse_document_no' => trim((string) ($row['Whse_Document_No'] ?? '')),
+        'action_label' => mithra_wh_row_action_label($row),
+        'activity_timestamp' => $activityTimestamp,
+    ];
+}
+
+/**
+ * @return list<string>
+ */
+function mithra_wh_forward_sync_odata_filters(string $activityDate, int $entryNoOnDate): array
+{
+    $date = mithra_normalize_date_only($activityDate);
+    if ($date === '') {
+        return [];
+    }
+
+    return [
+        'Registering_Date gt ' . $date,
+        'Registering_Date eq ' . $date . ' and Entry_No gt ' . max(0, $entryNoOnDate),
+    ];
+}
+
+/**
+ * @param list<array<string, mixed>> $entries
+ * @return list<array<string, mixed>>
+ */
+function mithra_filter_wh_entries_newer_than(array $entries, string $activityDate, int $entryNoOnDate): array
+{
+    $date = mithra_normalize_date_only($activityDate);
+    if ($date === '') {
+        return [];
+    }
+
+    $result = [];
+    foreach ($entries as $entry) {
+        if (!is_array($entry)) {
+            continue;
+        }
+
+        $entryDate = mithra_normalize_date_only((string) ($entry['activity_timestamp'] ?? ''));
+        $entryNo = (int) ($entry['entry_no'] ?? 0);
+        if ($entryDate === '' || $entryNo <= 0) {
+            continue;
+        }
+
+        if (strcmp($entryDate, $date) > 0) {
+            $result[] = $entry;
+            continue;
+        }
+
+        if (strcmp($entryDate, $date) === 0 && $entryNo > $entryNoOnDate) {
+            $result[] = $entry;
+        }
+    }
+
+    return $result;
+}
+
+function mithra_fetch_magazijnposten_with_filter(string $company, string $filter): array
+{
+    $rows = mithra_fetch_entity_with_filter(
+        $company,
+        MITHRA_WH_BC_ENTITY,
+        MITHRA_WH_BC_SELECT_FIELDS,
+        $filter,
+        'Registering_Date asc,Entry_No asc'
+    );
+
+    $entries = [];
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $entry = mithra_wh_row_to_entry($row);
+        if ($entry !== null) {
+            $entries[] = $entry;
+        }
+    }
+
+    return $entries;
+}
+
+function mithra_fetch_magazijnposten_range(string $company, string $fromDate, string $toDate): array
+{
+    $from = mithra_normalize_date_only($fromDate);
+    $to = mithra_normalize_date_only($toDate);
+    if ($from === '' || $to === '') {
+        throw new RuntimeException('Ongeldige datumbereik voor Magazijnposten.');
+    }
+
+    if (strcmp($from, $to) > 0) {
+        throw new RuntimeException('Datumbereik is ongeldig: vanaf ligt na tot.');
+    }
+
+    $filter = 'Registering_Date ge ' . $from . ' and Registering_Date le ' . $to;
+
+    return mithra_fetch_magazijnposten_with_filter($company, $filter);
+}
+
+function mithra_fetch_magazijnposten_newer_than(string $company, string $activityDate, int $entryNoOnDate): array
+{
+    $date = mithra_normalize_date_only($activityDate);
+    if ($date === '') {
+        return [];
+    }
+
+    $filters = mithra_wh_forward_sync_odata_filters($date, $entryNoOnDate);
+    if ($filters === []) {
+        return [];
+    }
+
+    $fetched = [];
+    foreach ($filters as $filter) {
+        $fetched[] = mithra_fetch_magazijnposten_with_filter($company, $filter);
+    }
+
+    return mithra_filter_wh_entries_newer_than(mithra_merge_scan_entries(...$fetched), $date, $entryNoOnDate);
 }
 
 function mithra_row_to_entry(array $row): ?array

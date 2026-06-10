@@ -61,6 +61,26 @@ function mithra_store_open_db(): SQLite3
     $db->exec('CREATE INDEX IF NOT EXISTS idx_scan_entries_user_ts ON scan_entries(company, username, scan_timestamp)');
     $db->exec('CREATE INDEX IF NOT EXISTS idx_scan_entries_ts ON scan_entries(company, scan_timestamp)');
     $db->exec('CREATE INDEX IF NOT EXISTS idx_scan_entries_process ON scan_entries(company, username, scan_process)');
+    $db->exec('CREATE TABLE IF NOT EXISTS warehouse_entries (
+        company TEXT NOT NULL,
+        entry_no INTEGER NOT NULL,
+        username TEXT NOT NULL,
+        entry_type TEXT NOT NULL DEFAULT "",
+        whse_document_no TEXT NOT NULL DEFAULT "",
+        action_label TEXT NOT NULL DEFAULT "",
+        activity_timestamp TEXT NOT NULL,
+        PRIMARY KEY (company, entry_no)
+    )');
+    $db->exec('CREATE INDEX IF NOT EXISTS idx_wh_entries_user_ts ON warehouse_entries(company, username, activity_timestamp)');
+    $db->exec('CREATE INDEX IF NOT EXISTS idx_wh_entries_ts ON warehouse_entries(company, activity_timestamp)');
+    $db->exec('CREATE INDEX IF NOT EXISTS idx_wh_entries_type ON warehouse_entries(company, username, entry_type)');
+    mithra_store_maybe_add_column($db, 'sync_state', 'wh_newest_activity_date', 'TEXT NOT NULL DEFAULT ""');
+    mithra_store_maybe_add_column($db, 'sync_state', 'wh_newest_entry_no', 'INTEGER NOT NULL DEFAULT 0');
+    mithra_store_maybe_add_column($db, 'sync_state', 'wh_oldest_activity_date', 'TEXT NOT NULL DEFAULT ""');
+    mithra_store_maybe_add_column($db, 'sync_state', 'wh_backfill_to_date', 'TEXT NOT NULL DEFAULT ""');
+    mithra_store_maybe_add_column($db, 'sync_state', 'wh_backfill_complete', 'INTEGER NOT NULL DEFAULT 0');
+    mithra_store_maybe_add_column($db, 'sync_state', 'wh_chunks_completed', 'INTEGER NOT NULL DEFAULT 0');
+    mithra_store_maybe_add_column($db, 'sync_state', 'wh_empty_backfill_months', 'TEXT NOT NULL DEFAULT ""');
 
     return $db;
 }
@@ -90,7 +110,7 @@ function mithra_store_get_sync_state(string $company): array
 {
     $companyKey = mithra_store_company_key($company);
     $db = mithra_store_open_db();
-    $stmt = $db->prepare('SELECT newest_scan_timestamp, oldest_scan_timestamp, backfill_to_date, backfill_complete, chunks_completed, empty_backfill_months, updated_at FROM sync_state WHERE company = :company LIMIT 1');
+    $stmt = $db->prepare('SELECT newest_scan_timestamp, oldest_scan_timestamp, backfill_to_date, backfill_complete, chunks_completed, empty_backfill_months, wh_newest_activity_date, wh_newest_entry_no, wh_oldest_activity_date, wh_backfill_to_date, wh_backfill_complete, wh_chunks_completed, wh_empty_backfill_months, updated_at FROM sync_state WHERE company = :company LIMIT 1');
     $stmt->bindValue(':company', $companyKey, SQLITE3_TEXT);
     $result = $stmt->execute();
     $row = null;
@@ -108,6 +128,13 @@ function mithra_store_get_sync_state(string $company): array
             'backfill_complete' => 0,
             'chunks_completed' => 0,
             'empty_backfill_months' => '',
+            'wh_newest_activity_date' => '',
+            'wh_newest_entry_no' => 0,
+            'wh_oldest_activity_date' => '',
+            'wh_backfill_to_date' => '',
+            'wh_backfill_complete' => 0,
+            'wh_chunks_completed' => 0,
+            'wh_empty_backfill_months' => '',
             'updated_at' => '',
         ];
     }
@@ -119,6 +146,13 @@ function mithra_store_get_sync_state(string $company): array
         'backfill_complete' => (int) ($row['backfill_complete'] ?? 0),
         'chunks_completed' => (int) ($row['chunks_completed'] ?? 0),
         'empty_backfill_months' => trim((string) ($row['empty_backfill_months'] ?? '')),
+        'wh_newest_activity_date' => trim((string) ($row['wh_newest_activity_date'] ?? '')),
+        'wh_newest_entry_no' => (int) ($row['wh_newest_entry_no'] ?? 0),
+        'wh_oldest_activity_date' => trim((string) ($row['wh_oldest_activity_date'] ?? '')),
+        'wh_backfill_to_date' => trim((string) ($row['wh_backfill_to_date'] ?? '')),
+        'wh_backfill_complete' => (int) ($row['wh_backfill_complete'] ?? 0),
+        'wh_chunks_completed' => (int) ($row['wh_chunks_completed'] ?? 0),
+        'wh_empty_backfill_months' => trim((string) ($row['wh_empty_backfill_months'] ?? '')),
         'updated_at' => trim((string) ($row['updated_at'] ?? '')),
     ];
 }
@@ -127,8 +161,8 @@ function mithra_store_save_sync_state(string $company, array $state): void
 {
     $companyKey = mithra_store_company_key($company);
     $db = mithra_store_open_db();
-    $stmt = $db->prepare('INSERT INTO sync_state (company, newest_scan_timestamp, oldest_scan_timestamp, backfill_to_date, backfill_complete, chunks_completed, empty_backfill_months, updated_at)
-        VALUES (:company, :newest, :oldest, :backfill_to_date, :backfill_complete, :chunks_completed, :empty_backfill_months, :updated_at)
+    $stmt = $db->prepare('INSERT INTO sync_state (company, newest_scan_timestamp, oldest_scan_timestamp, backfill_to_date, backfill_complete, chunks_completed, empty_backfill_months, wh_newest_activity_date, wh_newest_entry_no, wh_oldest_activity_date, wh_backfill_to_date, wh_backfill_complete, wh_chunks_completed, wh_empty_backfill_months, updated_at)
+        VALUES (:company, :newest, :oldest, :backfill_to_date, :backfill_complete, :chunks_completed, :empty_backfill_months, :wh_newest_activity_date, :wh_newest_entry_no, :wh_oldest_activity_date, :wh_backfill_to_date, :wh_backfill_complete, :wh_chunks_completed, :wh_empty_backfill_months, :updated_at)
         ON CONFLICT(company) DO UPDATE SET
             newest_scan_timestamp = excluded.newest_scan_timestamp,
             oldest_scan_timestamp = excluded.oldest_scan_timestamp,
@@ -136,6 +170,13 @@ function mithra_store_save_sync_state(string $company, array $state): void
             backfill_complete = excluded.backfill_complete,
             chunks_completed = excluded.chunks_completed,
             empty_backfill_months = excluded.empty_backfill_months,
+            wh_newest_activity_date = excluded.wh_newest_activity_date,
+            wh_newest_entry_no = excluded.wh_newest_entry_no,
+            wh_oldest_activity_date = excluded.wh_oldest_activity_date,
+            wh_backfill_to_date = excluded.wh_backfill_to_date,
+            wh_backfill_complete = excluded.wh_backfill_complete,
+            wh_chunks_completed = excluded.wh_chunks_completed,
+            wh_empty_backfill_months = excluded.wh_empty_backfill_months,
             updated_at = excluded.updated_at');
     $stmt->bindValue(':company', $companyKey, SQLITE3_TEXT);
     $stmt->bindValue(':newest', trim((string) ($state['newest_scan_timestamp'] ?? '')), SQLITE3_TEXT);
@@ -144,6 +185,13 @@ function mithra_store_save_sync_state(string $company, array $state): void
     $stmt->bindValue(':backfill_complete', (int) ($state['backfill_complete'] ?? 0), SQLITE3_INTEGER);
     $stmt->bindValue(':chunks_completed', (int) ($state['chunks_completed'] ?? 0), SQLITE3_INTEGER);
     $stmt->bindValue(':empty_backfill_months', trim((string) ($state['empty_backfill_months'] ?? '')), SQLITE3_TEXT);
+    $stmt->bindValue(':wh_newest_activity_date', trim((string) ($state['wh_newest_activity_date'] ?? '')), SQLITE3_TEXT);
+    $stmt->bindValue(':wh_newest_entry_no', (int) ($state['wh_newest_entry_no'] ?? 0), SQLITE3_INTEGER);
+    $stmt->bindValue(':wh_oldest_activity_date', trim((string) ($state['wh_oldest_activity_date'] ?? '')), SQLITE3_TEXT);
+    $stmt->bindValue(':wh_backfill_to_date', trim((string) ($state['wh_backfill_to_date'] ?? '')), SQLITE3_TEXT);
+    $stmt->bindValue(':wh_backfill_complete', (int) ($state['wh_backfill_complete'] ?? 0), SQLITE3_INTEGER);
+    $stmt->bindValue(':wh_chunks_completed', (int) ($state['wh_chunks_completed'] ?? 0), SQLITE3_INTEGER);
+    $stmt->bindValue(':wh_empty_backfill_months', trim((string) ($state['wh_empty_backfill_months'] ?? '')), SQLITE3_TEXT);
     $stmt->bindValue(':updated_at', gmdate('c'), SQLITE3_TEXT);
     $stmt->execute();
     $db->close();

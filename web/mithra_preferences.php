@@ -38,6 +38,86 @@ function mithra_get_saved_company(array $companies): string
     return (string) ($companies[0] ?? '');
 }
 
+function mithra_preferences_company_key(string $company): string
+{
+    return strtolower(trim($company));
+}
+
+function mithra_normalize_hidden_usernames(mixed $value): array
+{
+    if (!is_array($value)) {
+        return [];
+    }
+
+    $normalized = [];
+    foreach ($value as $username) {
+        $name = trim((string) $username);
+        if ($name === '') {
+            continue;
+        }
+        $normalized[strtolower($name)] = $name;
+    }
+
+    $usernames = array_values($normalized);
+    sort($usernames, SORT_NATURAL | SORT_FLAG_CASE);
+
+    return $usernames;
+}
+
+function mithra_get_hidden_usernames(string $company): array
+{
+    mithra_ensure_session();
+
+    $companyKey = mithra_preferences_company_key($company);
+    if ($companyKey === '') {
+        return [];
+    }
+
+    $userKey = mithra_current_user_key();
+    $hiddenMap = $_SESSION['mithra_hidden_users'] ?? null;
+    if (!is_array($hiddenMap) || !is_array($hiddenMap[$userKey] ?? null)) {
+        return [];
+    }
+
+    return mithra_normalize_hidden_usernames($hiddenMap[$userKey][$companyKey] ?? []);
+}
+
+function mithra_set_user_hidden(string $company, string $username, bool $hidden): array
+{
+    mithra_ensure_session();
+
+    $companyKey = mithra_preferences_company_key($company);
+    $username = trim($username);
+    if ($companyKey === '' || $username === '') {
+        throw new RuntimeException('Bedrijf of gebruiker ontbreekt.');
+    }
+
+    $userKey = mithra_current_user_key();
+    if (!is_array($_SESSION['mithra_hidden_users'] ?? null)) {
+        $_SESSION['mithra_hidden_users'] = [];
+    }
+    if (!is_array($_SESSION['mithra_hidden_users'][$userKey] ?? null)) {
+        $_SESSION['mithra_hidden_users'][$userKey] = [];
+    }
+
+    $current = mithra_normalize_hidden_usernames($_SESSION['mithra_hidden_users'][$userKey][$companyKey] ?? []);
+    $lookup = strtolower($username);
+    $filtered = [];
+    foreach ($current as $existing) {
+        if (strcasecmp($existing, $username) !== 0) {
+            $filtered[] = $existing;
+        }
+    }
+
+    if ($hidden) {
+        $filtered[] = $username;
+    }
+
+    $_SESSION['mithra_hidden_users'][$userKey][$companyKey] = mithra_normalize_hidden_usernames($filtered);
+
+    return $_SESSION['mithra_hidden_users'][$userKey][$companyKey];
+}
+
 function mithra_save_company_preference(string $company): void
 {
     mithra_ensure_session();

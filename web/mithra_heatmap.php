@@ -103,7 +103,7 @@ function mithra_heatmap_grid_from_date(string $today = '', ?int $rows = null, ?i
     return (string) ($dates[0] ?? mithra_heatmap_date_shift($today !== '' ? $today : mithra_heatmap_today_date(), $fallbackShift));
 }
 
-function mithra_heatmap_counts_from_entries(array $entries): array
+function mithra_heatmap_counts_from_entries(array $entries, string $timestampField = 'scan_timestamp'): array
 {
     $counts = [];
     foreach ($entries as $entry) {
@@ -111,7 +111,7 @@ function mithra_heatmap_counts_from_entries(array $entries): array
             continue;
         }
 
-        $date = mithra_normalize_date_only((string) ($entry['scan_timestamp'] ?? ''));
+        $date = mithra_normalize_date_only((string) ($entry[$timestampField] ?? ''));
         if ($date === '') {
             continue;
         }

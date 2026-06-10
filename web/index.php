@@ -83,6 +83,26 @@ $cacheWidget = injectTimerHtml([
 CSS,
 ]);
 
+if (mithra_action_is('save_hidden')) {
+    $company = trim((string) ($_POST['company'] ?? $_GET['company'] ?? ''));
+    $username = trim((string) ($_POST['username'] ?? $_GET['username'] ?? ''));
+    $hiddenRaw = trim((string) ($_POST['hidden'] ?? $_GET['hidden'] ?? '1'));
+    mithra_validate_company($company, $companies);
+
+    try {
+        $hidden = in_array(strtolower($hiddenRaw), ['1', 'true', 'yes', 'on'], true);
+        mithra_send_json([
+            'ok' => true,
+            'company' => $company,
+            'username' => $username,
+            'hidden' => $hidden,
+            'hidden_usernames' => mithra_set_user_hidden($company, $username, $hidden),
+        ]);
+    } catch (Throwable $error) {
+        mithra_runtime_error_payload($error, 'Zichtbaarheid opslaan mislukt.');
+    }
+}
+
 if (mithra_action_is('save_company')) {
     $company = trim((string) ($_POST['company'] ?? $_GET['company'] ?? ''));
     mithra_validate_company($company, $companies);
@@ -115,7 +135,9 @@ if (mithra_action_is('overview')) {
     mithra_validate_company($company, $companies);
 
     try {
-        mithra_send_json(mithra_overview_payload($company));
+        $payload = mithra_overview_payload($company);
+        $payload['hidden_usernames'] = mithra_get_hidden_usernames($company);
+        mithra_send_json($payload);
     } catch (Throwable $error) {
         mithra_runtime_error_payload($error, 'Overzicht laden mislukt.');
     }
@@ -318,21 +340,130 @@ if (mithra_action_is('user_detail')) {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
             gap: 14px;
+            overflow: visible;
         }
 
         .user-card {
+            position: relative;
             background: var(--panel);
             border: 1px solid var(--line);
             border-radius: 16px;
-            padding: 14px;
+            padding: 14px 42px 14px 14px;
             box-shadow: var(--shadow);
             cursor: pointer;
-            transition: transform 140ms ease, box-shadow 140ms ease;
+            transition: box-shadow 140ms ease;
         }
 
         .user-card:hover {
-            transform: translateY(-2px);
             box-shadow: 0 22px 44px rgba(0, 82, 155, 0.16);
+        }
+
+        .user-card-visibility {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 30px;
+            height: 30px;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: #fff;
+            color: var(--brand-dark);
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            padding: 0;
+            box-shadow: 0 4px 12px rgba(0, 82, 155, 0.08);
+        }
+
+        .user-card-visibility:hover {
+            border-color: var(--brand);
+            color: var(--brand);
+        }
+
+        .user-card-visibility svg {
+            width: 16px;
+            height: 16px;
+            display: block;
+        }
+
+        .hidden-users-section {
+            margin-top: 22px;
+        }
+
+        .hidden-users-section[hidden] {
+            display: none !important;
+        }
+
+        .hidden-users-divider {
+            border: 0;
+            border-top: 1px solid var(--line);
+            margin: 0 0 16px;
+        }
+
+        .hidden-users-panel {
+            background: var(--panel);
+            border: 1px solid var(--line);
+            border-radius: 16px;
+            padding: 14px 16px;
+            box-shadow: var(--shadow);
+        }
+
+        .hidden-users-title {
+            margin: 0 0 10px;
+            font-size: 0.92rem;
+            font-weight: 700;
+            color: var(--brand-dark);
+        }
+
+        .hidden-users-list {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            display: grid;
+            gap: 8px;
+        }
+
+        .hidden-users-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 8px 10px;
+            border-radius: 10px;
+            background: #f7fbff;
+        }
+
+        .hidden-users-name {
+            font-size: 0.9rem;
+            color: var(--text);
+            word-break: break-word;
+        }
+
+        .hidden-users-toggle {
+            width: 30px;
+            height: 30px;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: #fff;
+            color: var(--muted);
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            padding: 0;
+            flex: 0 0 auto;
+        }
+
+        .hidden-users-toggle:hover {
+            border-color: var(--brand);
+            color: var(--brand);
+        }
+
+        .hidden-users-toggle svg {
+            width: 16px;
+            height: 16px;
+            display: block;
         }
 
         .user-card-name {
@@ -473,7 +604,9 @@ if (mithra_action_is('user_detail')) {
         .modal {
             width: min(1120px, 100%);
             max-height: calc(100vh - 32px);
-            overflow: auto;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
             background: #fff;
             border-radius: 18px;
             box-shadow: 0 28px 60px rgba(0, 0, 0, 0.22);
@@ -484,17 +617,23 @@ if (mithra_action_is('user_detail')) {
             display: flex;
             align-items: flex-start;
             gap: 18px;
+            flex: 1 1 auto;
+            min-height: 0;
         }
 
         .modal-main {
             flex: 1 1 auto;
             min-width: 0;
+            max-height: calc(100vh - 120px);
+            overflow-y: auto;
+            padding-right: 4px;
         }
 
         .modal-heatmap-panel {
             flex: 0 0 auto;
             position: sticky;
             top: 0;
+            align-self: flex-start;
         }
 
         .modal-heatmap-caption {
@@ -657,6 +796,13 @@ if (mithra_action_is('user_detail')) {
         <div class="error-banner" id="errorBanner"></div>
 
         <div class="user-grid" id="userGrid"></div>
+        <section class="hidden-users-section" id="hiddenUsersSection" hidden>
+            <hr class="hidden-users-divider">
+            <div class="hidden-users-panel">
+                <h3 class="hidden-users-title">Verborgen:</h3>
+                <ul class="hidden-users-list" id="hiddenUsersList"></ul>
+            </div>
+        </section>
         <div class="empty-state" id="emptyState" hidden>Nog geen scanregels gevonden. Start synchronisatie om data op te halen uit Business Central.</div>
     </div>
 
@@ -677,6 +823,8 @@ if (mithra_action_is('user_detail')) {
             const statusText = document.getElementById('statusText');
             const errorBanner = document.getElementById('errorBanner');
             const userGrid = document.getElementById('userGrid');
+            const hiddenUsersSection = document.getElementById('hiddenUsersSection');
+            const hiddenUsersList = document.getElementById('hiddenUsersList');
             const emptyState = document.getElementById('emptyState');
             const userModal = document.getElementById('userModal');
             const modalTitle = document.getElementById('modalTitle');
@@ -685,6 +833,283 @@ if (mithra_action_is('user_detail')) {
 
             let heatmapIntensityMax = <?= (int) MITHRA_HEATMAP_INTENSITY_MAX ?>;
             let isSyncing = false;
+            let overviewUsers = [];
+            let hiddenUsernames = new Set();
+            let visibilityAnimating = false;
+
+            const eyeOpenSvg = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 5C7 5 2.73 8.11 1 12c1.73 3.89 6 7 11 7s9.27-3.11 11-7c-1.73-3.89-6-7-11-7zm0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"/></svg>';
+            const eyeClosedSvg = '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 6.5c2.76 0 5.26 1.12 7.08 2.92L17.5 11l1.41 1.41 2.59-2.58C23.27 7.89 19 4.5 12 4.5c-1.4 0-2.68.2-3.85.54l1.53 1.53C10.4 6.53 11.17 6.5 12 6.5zM2.27 3.77 1 5.04l2.05 2.05C2.73 8.11 1 11 1 12c1.73 3.89 6 7 11 7 1.77 0 3.43-.4 4.92-1.09l2.2 2.2 1.27-1.27L2.27 3.77zM7.53 9.8 9.16 11.4C9.06 11.59 9 11.79 9 12a3 3 0 0 0 3 3c.21 0 .41-.06.6-.16l1.6 1.6A4.98 4.98 0 0 1 12 17a5 5 0 0 1-5-5c0-.79.19-1.53.53-2.2z"/></svg>';
+
+            function usernameKey(value)
+            {
+                return String(value || '').trim().toLowerCase();
+            }
+
+            function isUserHidden(username)
+            {
+                return hiddenUsernames.has(usernameKey(username));
+            }
+
+            function setHiddenUsernames(list)
+            {
+                hiddenUsernames = new Set();
+                for (const name of Array.isArray(list) ? list : [])
+                {
+                    const key = usernameKey(name);
+                    if (key !== '')
+                    {
+                        hiddenUsernames.add(key);
+                    }
+                }
+            }
+
+            function findOverviewUser(username)
+            {
+                const key = usernameKey(username);
+                for (const user of overviewUsers)
+                {
+                    if (usernameKey(user.username) === key)
+                    {
+                        return user;
+                    }
+                }
+
+                return null;
+            }
+
+            function findUserCardElement(username)
+            {
+                for (const candidate of userGrid.querySelectorAll('.user-card'))
+                {
+                    if (String(candidate.dataset.username || '') === username)
+                    {
+                        return candidate;
+                    }
+                }
+
+                return null;
+            }
+
+            function fadeOutCard(card)
+            {
+                card.style.pointerEvents = 'none';
+                return card.animate([
+                    { opacity: 1 },
+                    { opacity: 0 }
+                ], {
+                    duration: 220,
+                    easing: 'ease-out',
+                    fill: 'forwards'
+                }).finished;
+            }
+
+            function createVisibilityButton(isHidden, label)
+            {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = isHidden ? 'hidden-users-toggle' : 'user-card-visibility';
+                button.setAttribute('aria-label', label);
+                button.innerHTML = isHidden ? eyeClosedSvg : eyeOpenSvg;
+                return button;
+            }
+
+            function bindUserCard(card, user)
+            {
+                const username = String(user.username || '');
+                card.dataset.username = username;
+
+                card.addEventListener('click', function ()
+                {
+                    openUserModal(username);
+                });
+
+                const visibilityButton = createVisibilityButton(false, 'Gebruiker verbergen');
+                visibilityButton.addEventListener('click', function (event)
+                {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    hideUserCard(username);
+                });
+                card.appendChild(visibilityButton);
+            }
+
+            function buildUserCardElement(user)
+            {
+                const days = Array.isArray(user.days) ? user.days : [];
+                const card = document.createElement('article');
+                card.className = 'user-card';
+                card.innerHTML = '<h3 class="user-card-name">' + escapeHtml(user.username || '') + '</h3>'
+                    + '<div class="user-card-body">'
+                    + renderHeatmap(days)
+                    + renderUserCardStats(days)
+                    + '</div>';
+                bindUserCard(card, user);
+                return card;
+            }
+
+            function renderHiddenUsersList()
+            {
+                hiddenUsersList.innerHTML = '';
+                const hiddenNames = overviewUsers
+                    .map(function (user) { return String(user.username || ''); })
+                    .filter(function (username) { return isUserHidden(username); })
+                    .sort(function (a, b) { return a.localeCompare(b, 'nl', { sensitivity: 'base' }); });
+
+                if (hiddenNames.length === 0)
+                {
+                    hiddenUsersSection.hidden = true;
+                    return;
+                }
+
+                hiddenUsersSection.hidden = false;
+                for (const username of hiddenNames)
+                {
+                    const item = document.createElement('li');
+                    item.className = 'hidden-users-item';
+
+                    const name = document.createElement('span');
+                    name.className = 'hidden-users-name';
+                    name.textContent = username;
+
+                    const button = createVisibilityButton(true, 'Gebruiker tonen');
+                    button.addEventListener('click', function (event)
+                    {
+                        event.preventDefault();
+                        showUserCard(username);
+                    });
+
+                    item.appendChild(name);
+                    item.appendChild(button);
+                    hiddenUsersList.appendChild(item);
+                }
+            }
+
+            function renderVisibleUserGrid(options)
+            {
+                options = options || {};
+                const skipHiddenList = !!options.skipHiddenList;
+
+                userGrid.innerHTML = '';
+
+                for (const user of overviewUsers)
+                {
+                    const username = String(user.username || '');
+                    if (isUserHidden(username))
+                    {
+                        continue;
+                    }
+
+                    userGrid.appendChild(buildUserCardElement(user));
+                }
+
+                if (!skipHiddenList)
+                {
+                    renderHiddenUsersList();
+                }
+            }
+
+            async function persistHiddenState(username, hidden)
+            {
+                const response = await fetch('index.php?action=save_hidden', {
+                    method: 'POST',
+                    headers: { 'Accept': 'application/json' },
+                    credentials: 'same-origin',
+                    body: new URLSearchParams({
+                        company: selectedCompany(),
+                        username: username,
+                        hidden: hidden ? '1' : '0'
+                    })
+                });
+
+                const payload = await response.json();
+                if (!payload || !payload.ok)
+                {
+                    throw new Error((payload && payload.error) || 'Zichtbaarheid opslaan mislukt.');
+                }
+
+                setHiddenUsernames(payload.hidden_usernames || []);
+                return payload;
+            }
+
+            async function hideUserCard(username)
+            {
+                if (visibilityAnimating || isUserHidden(username))
+                {
+                    return;
+                }
+
+                const card = findUserCardElement(username);
+                if (!card)
+                {
+                    return;
+                }
+
+                visibilityAnimating = true;
+                const previousHidden = new Set(hiddenUsernames);
+
+                try
+                {
+                    await fadeOutCard(card);
+                    hiddenUsernames.add(usernameKey(username));
+                    renderVisibleUserGrid();
+                    await persistHiddenState(username, true);
+                }
+                catch (error)
+                {
+                    hiddenUsernames = previousHidden;
+                    showError(error.message || 'Verbergen mislukt.');
+                    renderVisibleUserGrid();
+                }
+                finally
+                {
+                    visibilityAnimating = false;
+                }
+            }
+
+            async function showUserCard(username)
+            {
+                if (visibilityAnimating || !isUserHidden(username) || !findOverviewUser(username))
+                {
+                    return;
+                }
+
+                visibilityAnimating = true;
+                const previousHidden = new Set(hiddenUsernames);
+
+                try
+                {
+                    await persistHiddenState(username, false);
+                    renderVisibleUserGrid();
+                }
+                catch (error)
+                {
+                    hiddenUsernames = previousHidden;
+                    showError(error.message || 'Tonen mislukt.');
+                    renderVisibleUserGrid();
+                }
+                finally
+                {
+                    visibilityAnimating = false;
+                }
+            }
+
+            function renderOverview(payload)
+            {
+                heatmapIntensityMax = Number(payload.heatmap_intensity_max || heatmapIntensityMax);
+                overviewUsers = Array.isArray(payload.users) ? payload.users : [];
+                setHiddenUsernames(payload.hidden_usernames || []);
+
+                if (overviewUsers.length === 0)
+                {
+                    userGrid.innerHTML = '';
+                    hiddenUsersSection.hidden = true;
+                    emptyState.hidden = false;
+                    return;
+                }
+
+                emptyState.hidden = true;
+                renderVisibleUserGrid();
+            }
 
             function selectedCompany()
             {
@@ -786,7 +1211,7 @@ if (mithra_action_is('user_detail')) {
                 const stats = computeUserCardStats(days);
                 return '<div class="user-card-stats">'
                     + '<div class="user-card-stat">'
-                    + '<span class="user-card-stat-label">Gescand 28 dagen:</span>'
+                    + '<span class="user-card-stat-label">Activiteit 28 dagen:</span>'
                     + '<span class="user-card-stat-value">' + escapeHtml(stats.total.toLocaleString('nl-NL')) + '</span>'
                     + '</div>'
                     + '<div class="user-card-stat">'
@@ -817,8 +1242,8 @@ if (mithra_action_is('user_detail')) {
 
                     const count = Number(day.count || 0);
                     const level = heatLevel(count, heatmapIntensityMax);
-                    const scanLabel = count === 1 ? '1 scan' : (count + ' scans');
-                    const title = formatDutchDate(day.date) + ' — ' + scanLabel;
+                    const activityLabel = count === 1 ? '1 activiteit' : (count + ' activiteiten');
+                    const title = formatDutchDate(day.date) + ' — ' + activityLabel;
                     const medal = level === 'level-over' ? '<span class="heat-cell-medal" aria-hidden="true">⭐</span>' : '';
                     html += '<div class="heat-cell ' + level + todayClass + '" title="' + escapeHtml(title) + '">' + medal + '</div>';
                 }
@@ -846,72 +1271,53 @@ if (mithra_action_is('user_detail')) {
                     .replace(/'/g, '&#039;');
             }
 
-            function renderOverview(payload)
-            {
-                heatmapIntensityMax = Number(payload.heatmap_intensity_max || heatmapIntensityMax);
-                const users = Array.isArray(payload.users) ? payload.users : [];
-                userGrid.innerHTML = '';
-
-                if (users.length === 0)
-                {
-                    emptyState.hidden = false;
-                    return;
-                }
-
-                emptyState.hidden = true;
-                for (const user of users)
-                {
-                    const days = Array.isArray(user.days) ? user.days : [];
-                    const card = document.createElement('article');
-                    card.className = 'user-card';
-                    card.dataset.username = String(user.username || '');
-                    card.innerHTML = '<h3 class="user-card-name">' + escapeHtml(user.username || '') + '</h3>'
-                        + '<div class="user-card-body">'
-                        + renderHeatmap(days)
-                        + renderUserCardStats(days)
-                        + '</div>';
-                    card.addEventListener('click', function ()
-                    {
-                        openUserModal(user.username);
-                    });
-                    userGrid.appendChild(card);
-                }
-            }
-
-            function formatStatValue(label, value)
+            function formatDualStatValue(label, stats)
             {
                 const avgLabels = ['Gem. per dag', 'Gem. per week', 'Gem. per maand'];
-                if (avgLabels.indexOf(label) !== -1)
-                {
-                    return Math.round(Number(value || 0)).toLocaleString('nl-NL');
-                }
+                const metricKey = label === 'Deze week'
+                    ? 'week'
+                    : (label === 'Deze maand'
+                        ? 'month'
+                        : (label === 'Totaal'
+                            ? 'total'
+                            : (label === 'Gem. per dag'
+                                ? 'avg_day'
+                                : (label === 'Gem. per week' ? 'avg_week' : 'avg_month'))));
 
-                return String(value ?? '');
+                const metric = stats[metricKey] || {};
+                const scans = avgLabels.indexOf(label) !== -1
+                    ? Math.round(Number(metric.scans || 0))
+                    : Number(metric.scans || 0);
+                const handelingen = avgLabels.indexOf(label) !== -1
+                    ? Math.round(Number(metric.handelingen || 0))
+                    : Number(metric.handelingen || 0);
+
+                return scans.toLocaleString('nl-NL') + ' scans, ' + handelingen.toLocaleString('nl-NL') + ' handelingen';
             }
 
             function renderStatsBlock(title, stats)
             {
                 const items = [
-                    ['Deze week', stats.week],
-                    ['Deze maand', stats.month],
-                    ['Totaal', stats.total],
-                    ['Gem. per dag', stats.avg_day],
-                    ['Gem. per week', stats.avg_week],
-                    ['Gem. per maand', stats.avg_month]
+                    'Deze week',
+                    'Deze maand',
+                    'Totaal',
+                    'Gem. per dag',
+                    'Gem. per week',
+                    'Gem. per maand'
                 ];
 
                 let html = '<section class="stats-section">';
                 html += '<div class="stats-section-head">' + escapeHtml(title) + '</div>';
                 html += '<div class="stats-grid">';
-                for (const item of items)
+                for (const label of items)
                 {
-                    html += '<div class="stat-item"><span class="stat-label">' + escapeHtml(item[0]) + '</span><span class="stat-value">' + escapeHtml(formatStatValue(item[0], item[1])) + '</span></div>';
+                    html += '<div class="stat-item"><span class="stat-label">' + escapeHtml(label) + '</span><span class="stat-value">' + escapeHtml(formatDualStatValue(label, stats || {})) + '</span></div>';
                 }
                 html += '</div></section>';
                 return html;
             }
 
-            function renderChart(chartDays)
+            function renderChart(chartDays, title, unitLabel)
             {
                 const days = Array.isArray(chartDays) ? chartDays : [];
                 const maxCount = days.reduce(function (max, day)
@@ -924,15 +1330,15 @@ if (mithra_action_is('user_detail')) {
                 {
                     const count = Number(day.count || 0);
                     const height = maxCount > 0 ? Math.max(2, Math.round((count / maxCount) * 100)) : 2;
-                    const title = formatDutchDate(day.date) + ' — ' + count + ' scans';
-                    bars += '<div class="chart-bar" style="height:' + height + '%" title="' + escapeHtml(title) + '"></div>';
+                    const titleText = formatDutchDate(day.date) + ' — ' + count + ' ' + unitLabel;
+                    bars += '<div class="chart-bar" style="height:' + height + '%" title="' + escapeHtml(titleText) + '"></div>';
                 }
 
                 const firstLabel = days.length > 0 ? formatDutchDate(days[0].date) : '';
                 const lastLabel = days.length > 0 ? formatDutchDate(days[days.length - 1].date) : '';
 
                 return '<div class="chart-wrap">'
-                    + '<h3 class="chart-title">Scans afgelopen 28 dagen</h3>'
+                    + '<h3 class="chart-title">' + escapeHtml(title) + '</h3>'
                     + '<div class="chart-bars">' + bars + '</div>'
                     + '<div class="chart-axis"><span>' + escapeHtml(firstLabel) + '</span><span>' + escapeHtml(lastLabel) + '</span></div>'
                     + '</div>';
@@ -969,7 +1375,13 @@ if (mithra_action_is('user_detail')) {
                         {
                             mainHtml += renderStatsBlock(String(block.scan_process || 'Scanproces'), block.stats || {});
                         }
-                        mainHtml += renderChart(payload.chart_30_days || []);
+                        mainHtml += renderChart(payload.chart_30_days_scans || [], 'Scans afgelopen 28 dagen', 'scans');
+                        const entryTypes = Array.isArray(payload.by_entry_type) ? payload.by_entry_type : [];
+                        for (const block of entryTypes)
+                        {
+                            mainHtml += renderStatsBlock(String(block.entry_type || 'Magazijnhandeling'), block.stats || {});
+                        }
+                        mainHtml += renderChart(payload.chart_30_days_wh || [], 'Magazijnhandelingen afgelopen 28 dagen', 'handelingen');
                         modalContent.innerHTML = '<div class="modal-body">'
                             + '<div class="modal-main">' + mainHtml + '</div>'
                             + renderModalHeatmapPanel(payload)

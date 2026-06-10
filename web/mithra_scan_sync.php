@@ -5,6 +5,7 @@
  */
 require_once __DIR__ . '/mithra_bc.php';
 require_once __DIR__ . '/mithra_scan_store.php';
+require_once __DIR__ . '/mithra_wh_store.php';
 require_once __DIR__ . '/mithra_heatmap.php';
 
 /**
@@ -190,18 +191,28 @@ function mithra_sync_chunk_progress(int $chunkCurrent, bool $backfillComplete): 
 
 function mithra_sync_refresh_backfill_state(array $state, string $company): array
 {
-    if ((int) ($state['backfill_complete'] ?? 0) !== 1 || trim((string) ($state['backfill_to_date'] ?? '')) !== '') {
-        return $state;
+    if ((int) ($state['backfill_complete'] ?? 0) === 1 && trim((string) ($state['backfill_to_date'] ?? '')) === '') {
+        $oldestDate = mithra_normalize_date_only((string) ($state['oldest_scan_timestamp'] ?? ''));
+        if ($oldestDate === '') {
+            $bounds = mithra_store_recompute_bounds($company);
+            $oldestDate = mithra_normalize_date_only((string) ($bounds['oldest_scan_timestamp'] ?? ''));
+        }
+
+        if ($oldestDate !== '' && strcmp($oldestDate, mithra_sync_backfill_limit_date()) > 0) {
+            $state['backfill_complete'] = 0;
+        }
     }
 
-    $oldestDate = mithra_normalize_date_only((string) ($state['oldest_scan_timestamp'] ?? ''));
-    if ($oldestDate === '') {
-        $bounds = mithra_store_recompute_bounds($company);
-        $oldestDate = mithra_normalize_date_only((string) ($bounds['oldest_scan_timestamp'] ?? ''));
-    }
+    if ((int) ($state['wh_backfill_complete'] ?? 0) === 1 && trim((string) ($state['wh_backfill_to_date'] ?? '')) === '') {
+        $oldestDate = mithra_normalize_date_only((string) ($state['wh_oldest_activity_date'] ?? ''));
+        if ($oldestDate === '') {
+            $bounds = mithra_wh_store_recompute_bounds($company);
+            $oldestDate = trim((string) ($bounds['wh_oldest_activity_date'] ?? ''));
+        }
 
-    if ($oldestDate !== '' && strcmp($oldestDate, mithra_sync_backfill_limit_date()) > 0) {
-        $state['backfill_complete'] = 0;
+        if ($oldestDate !== '' && strcmp($oldestDate, mithra_sync_backfill_limit_date()) > 0) {
+            $state['wh_backfill_complete'] = 0;
+        }
     }
 
     return $state;
@@ -209,7 +220,119 @@ function mithra_sync_refresh_backfill_state(array $state, string $company): arra
 
 function mithra_sync_needs_backfill_chunks(array $state): bool
 {
-    return (int) ($state['backfill_complete'] ?? 0) !== 1;
+    return (int) ($state['backfill_complete'] ?? 0) !== 1
+        || (int) ($state['wh_backfill_complete'] ?? 0) !== 1;
+}
+
+function mithra_sync_apply_wh_bounds(array $state, array $bounds): array
+{
+    if (trim((string) ($bounds['wh_newest_activity_date'] ?? '')) !== '') {
+        $state['wh_newest_activity_date'] = trim((string) ($bounds['wh_newest_activity_date'] ?? ''));
+        $state['wh_newest_entry_no'] = (int) ($bounds['wh_newest_entry_no'] ?? 0);
+    }
+    if (trim((string) ($bounds['wh_oldest_activity_date'] ?? '')) !== '') {
+        $state['wh_oldest_activity_date'] = trim((string) ($bounds['wh_oldest_activity_date'] ?? ''));
+    }
+
+    return $state;
+}
+
+function mithra_sync_fetch_scan_forward(string $company, array $state): array
+{
+    $newest = trim((string) ($state['newest_scan_timestamp'] ?? ''));
+    if ($newest === '') {
+        return [];
+    }
+
+    return mithra_fetch_scanposten_newer_than($company, $newest);
+}
+
+function mithra_sync_fetch_wh_forward(string $company, array $state): array
+{
+    $newestDate = trim((string) ($state['wh_newest_activity_date'] ?? ''));
+    if ($newestDate === '') {
+        return [];
+    }
+
+    return mithra_fetch_magazijnposten_newer_than(
+        $company,
+        $newestDate,
+        (int) ($state['wh_newest_entry_no'] ?? 0)
+    );
+}
+
+function mithra_sync_resolve_wh_backfill_range(array $state, string $company): array
+{
+    $backfillToDate = trim((string) ($state['wh_backfill_to_date'] ?? ''));
+
+    if ($backfillToDate === '') {
+        $oldest = trim((string) ($state['wh_oldest_activity_date'] ?? ''));
+        if ($oldest === '') {
+            $bounds = mithra_wh_store_recompute_bounds($company);
+            $oldest = trim((string) ($bounds['wh_oldest_activity_date'] ?? ''));
+        }
+
+        if ($oldest !== '') {
+            $backfillToDate = mithra_sync_date_shift($oldest, -1);
+            $mode = 'backfill';
+        } else {
+            $backfillToDate = mithra_sync_today_date();
+            $mode = 'initial';
+        }
+    } else {
+        $mode = 'backfill';
+    }
+
+    if ($backfillToDate === '') {
+        return [
+            'mode' => 'idle',
+            'from_date' => '',
+            'to_date' => '',
+            'next_backfill_to_date' => '',
+        ];
+    }
+
+    $fromDate = mithra_sync_date_shift($backfillToDate, -(MITHRA_SYNC_CHUNK_DAYS - 1));
+    $nextBackfillToDate = mithra_sync_date_shift($fromDate, -1);
+
+    return [
+        'mode' => $mode,
+        'from_date' => $fromDate,
+        'to_date' => $backfillToDate,
+        'next_backfill_to_date' => $nextBackfillToDate,
+    ];
+}
+
+function mithra_sync_update_wh_backfill_state(array $newState, array $backfillRange, array $whBackfillEntries, string $fromDate, string $toDate, array $emptyMonths): array
+{
+    if ((int) ($newState['wh_backfill_complete'] ?? 0) === 1 || $fromDate === '' || $toDate === '') {
+        return $newState;
+    }
+
+    $newState['wh_backfill_to_date'] = trim((string) ($backfillRange['next_backfill_to_date'] ?? ''));
+
+    if ($whBackfillEntries === []) {
+        foreach (mithra_sync_months_in_range($fromDate, $toDate) as $monthKey) {
+            $emptyMonths[] = $monthKey;
+        }
+        $emptyMonths = mithra_sync_decode_empty_months(mithra_sync_encode_empty_months($emptyMonths));
+        $newState['wh_empty_backfill_months'] = mithra_sync_encode_empty_months($emptyMonths);
+
+        if (mithra_sync_has_consecutive_empty_months($emptyMonths, MITHRA_BACKFILL_EMPTY_MONTHS_STOP)) {
+            $newState['wh_backfill_complete'] = 1;
+            $newState['wh_backfill_to_date'] = '';
+        }
+    } else {
+        $newState['wh_empty_backfill_months'] = '';
+    }
+
+    $limitDate = mithra_sync_backfill_limit_date();
+    if ((int) ($newState['wh_backfill_complete'] ?? 0) !== 1 && strcmp($fromDate, $limitDate) <= 0) {
+        $newState['wh_backfill_complete'] = 1;
+        $newState['wh_backfill_to_date'] = '';
+    }
+
+    return $newState;
 }
 
 function mithra_sync_run(string $company): array
@@ -226,6 +349,7 @@ function mithra_sync_run(string $company): array
 function mithra_sync_forward_only(string $company, array $state): array
 {
     $bounds = mithra_store_recompute_bounds($company);
+    $whBounds = mithra_wh_store_recompute_bounds($company);
 
     if ($bounds['newest_scan_timestamp'] !== '') {
         $state['newest_scan_timestamp'] = $bounds['newest_scan_timestamp'];
@@ -233,15 +357,16 @@ function mithra_sync_forward_only(string $company, array $state): array
     if ($bounds['oldest_scan_timestamp'] !== '') {
         $state['oldest_scan_timestamp'] = $bounds['oldest_scan_timestamp'];
     }
+    $state = mithra_sync_apply_wh_bounds($state, $whBounds);
 
-    $fetchedEntries = [];
-    $newest = trim((string) ($state['newest_scan_timestamp'] ?? ''));
-    if ($newest !== '') {
-        $fetchedEntries = mithra_fetch_scanposten_newer_than($company, $newest);
-    }
+    $scanEntries = mithra_sync_fetch_scan_forward($company, $state);
+    $whEntries = mithra_sync_fetch_wh_forward($company, $state);
 
-    $inserted = mithra_store_insert_entries($company, $fetchedEntries);
+    $insertedScans = mithra_store_insert_entries($company, $scanEntries);
+    $insertedWh = mithra_wh_store_insert_entries($company, $whEntries);
+
     $bounds = mithra_store_recompute_bounds($company);
+    $whBounds = mithra_wh_store_recompute_bounds($company);
 
     $newState = [
         'newest_scan_timestamp' => $bounds['newest_scan_timestamp'],
@@ -250,6 +375,13 @@ function mithra_sync_forward_only(string $company, array $state): array
         'backfill_complete' => 1,
         'chunks_completed' => (int) ($state['chunks_completed'] ?? 0),
         'empty_backfill_months' => '',
+        'wh_newest_activity_date' => trim((string) ($whBounds['wh_newest_activity_date'] ?? '')),
+        'wh_newest_entry_no' => (int) ($whBounds['wh_newest_entry_no'] ?? 0),
+        'wh_oldest_activity_date' => trim((string) ($whBounds['wh_oldest_activity_date'] ?? '')),
+        'wh_backfill_to_date' => '',
+        'wh_backfill_complete' => 1,
+        'wh_chunks_completed' => (int) ($state['wh_chunks_completed'] ?? 0),
+        'wh_empty_backfill_months' => '',
         'updated_at' => gmdate('c'),
     ];
 
@@ -262,8 +394,10 @@ function mithra_sync_forward_only(string $company, array $state): array
         'mode' => 'forward',
         'from_date' => '',
         'to_date' => '',
-        'fetched_count' => count($fetchedEntries),
-        'inserted_count' => $inserted,
+        'fetched_count' => count($scanEntries) + count($whEntries),
+        'inserted_count' => $insertedScans + $insertedWh,
+        'inserted_scans' => $insertedScans,
+        'inserted_wh' => $insertedWh,
         'chunk_current' => 0,
         'chunk_total' => 0,
         'sync_state' => $newState,
@@ -318,8 +452,9 @@ function mithra_sync_resolve_backfill_range(array $state, string $company): arra
 function mithra_sync_backfill_chunk(string $company, array $state): array
 {
     $bounds = mithra_store_recompute_bounds($company);
+    $whBounds = mithra_wh_store_recompute_bounds($company);
 
-    $chunksCompleted = (int) ($state['chunks_completed'] ?? 0);
+    $chunksCompleted = max((int) ($state['chunks_completed'] ?? 0), (int) ($state['wh_chunks_completed'] ?? 0));
     $chunkCurrent = $chunksCompleted + 1;
 
     if ($bounds['newest_scan_timestamp'] !== '') {
@@ -328,20 +463,28 @@ function mithra_sync_backfill_chunk(string $company, array $state): array
     if ($bounds['oldest_scan_timestamp'] !== '') {
         $state['oldest_scan_timestamp'] = $bounds['oldest_scan_timestamp'];
     }
+    $state = mithra_sync_apply_wh_bounds($state, $whBounds);
 
     $modes = [];
-    $fetchedEntries = [];
-    $backfillEntries = [];
+    $scanFetched = [];
+    $whFetched = [];
+    $scanBackfillEntries = [];
+    $whBackfillEntries = [];
     $fromDate = '';
     $toDate = '';
+    $whFromDate = '';
+    $whToDate = '';
 
-    $newest = trim((string) ($state['newest_scan_timestamp'] ?? ''));
-    if ($newest !== '') {
-        $modes[] = 'forward';
-        $fetchedEntries = array_merge(
-            $fetchedEntries,
-            mithra_fetch_scanposten_newer_than($company, $newest)
-        );
+    $scanForward = mithra_sync_fetch_scan_forward($company, $state);
+    if ($scanForward !== []) {
+        $modes[] = 'forward-scan';
+        $scanFetched = array_merge($scanFetched, $scanForward);
+    }
+
+    $whForward = mithra_sync_fetch_wh_forward($company, $state);
+    if ($whForward !== []) {
+        $modes[] = 'forward-wh';
+        $whFetched = array_merge($whFetched, $whForward);
     }
 
     $backfillRange = [
@@ -357,16 +500,38 @@ function mithra_sync_backfill_chunk(string $company, array $state): array
         $toDate = (string) ($backfillRange['to_date'] ?? '');
 
         if ($fromDate !== '' && $toDate !== '') {
-            $modes[] = (string) ($backfillRange['mode'] ?? 'backfill');
-            $backfillEntries = mithra_fetch_scanposten_range($company, $fromDate, $toDate);
-            $fetchedEntries = array_merge($fetchedEntries, $backfillEntries);
+            $modes[] = (string) ($backfillRange['mode'] ?? 'backfill-scan');
+            $scanBackfillEntries = mithra_fetch_scanposten_range($company, $fromDate, $toDate);
+            $scanFetched = array_merge($scanFetched, $scanBackfillEntries);
         }
     }
 
-    $inserted = mithra_store_insert_entries($company, $fetchedEntries);
+    $whBackfillRange = [
+        'mode' => 'idle',
+        'from_date' => '',
+        'to_date' => '',
+        'next_backfill_to_date' => trim((string) ($state['wh_backfill_to_date'] ?? '')),
+    ];
+
+    if ((int) ($state['wh_backfill_complete'] ?? 0) !== 1) {
+        $whBackfillRange = mithra_sync_resolve_wh_backfill_range($state, $company);
+        $whFromDate = (string) ($whBackfillRange['from_date'] ?? '');
+        $whToDate = (string) ($whBackfillRange['to_date'] ?? '');
+
+        if ($whFromDate !== '' && $whToDate !== '') {
+            $modes[] = (string) ($whBackfillRange['mode'] ?? 'backfill-wh');
+            $whBackfillEntries = mithra_fetch_magazijnposten_range($company, $whFromDate, $whToDate);
+            $whFetched = array_merge($whFetched, $whBackfillEntries);
+        }
+    }
+
+    $insertedScans = mithra_store_insert_entries($company, $scanFetched);
+    $insertedWh = mithra_wh_store_insert_entries($company, $whFetched);
     $bounds = mithra_store_recompute_bounds($company);
+    $whBounds = mithra_wh_store_recompute_bounds($company);
 
     $emptyMonths = mithra_sync_decode_empty_months($state['empty_backfill_months'] ?? '');
+    $whEmptyMonths = mithra_sync_decode_empty_months($state['wh_empty_backfill_months'] ?? '');
 
     $newState = [
         'newest_scan_timestamp' => $bounds['newest_scan_timestamp'],
@@ -375,13 +540,20 @@ function mithra_sync_backfill_chunk(string $company, array $state): array
         'backfill_complete' => (int) ($state['backfill_complete'] ?? 0),
         'chunks_completed' => $chunkCurrent,
         'empty_backfill_months' => mithra_sync_encode_empty_months($emptyMonths),
+        'wh_newest_activity_date' => trim((string) ($whBounds['wh_newest_activity_date'] ?? '')),
+        'wh_newest_entry_no' => (int) ($whBounds['wh_newest_entry_no'] ?? 0),
+        'wh_oldest_activity_date' => trim((string) ($whBounds['wh_oldest_activity_date'] ?? '')),
+        'wh_backfill_to_date' => trim((string) ($state['wh_backfill_to_date'] ?? '')),
+        'wh_backfill_complete' => (int) ($state['wh_backfill_complete'] ?? 0),
+        'wh_chunks_completed' => $chunkCurrent,
+        'wh_empty_backfill_months' => mithra_sync_encode_empty_months($whEmptyMonths),
         'updated_at' => gmdate('c'),
     ];
 
     if ((int) $newState['backfill_complete'] !== 1 && $fromDate !== '' && $toDate !== '') {
         $newState['backfill_to_date'] = trim((string) ($backfillRange['next_backfill_to_date'] ?? ''));
 
-        if ($backfillEntries === []) {
+        if ($scanBackfillEntries === []) {
             foreach (mithra_sync_months_in_range($fromDate, $toDate) as $monthKey) {
                 $emptyMonths[] = $monthKey;
             }
@@ -403,25 +575,41 @@ function mithra_sync_backfill_chunk(string $company, array $state): array
         }
     }
 
+    $newState = mithra_sync_update_wh_backfill_state(
+        $newState,
+        $whBackfillRange,
+        $whBackfillEntries,
+        $whFromDate,
+        $whToDate,
+        $whEmptyMonths
+    );
+
     mithra_store_save_sync_state($company, $newState);
 
     $modeLabel = $modes !== [] ? implode('+', array_values(array_unique($modes))) : 'idle';
-    $chunkProgress = mithra_sync_chunk_progress($chunkCurrent, (int) $newState['backfill_complete'] === 1);
+    $chunkProgress = mithra_sync_chunk_progress(
+        $chunkCurrent,
+        (int) $newState['backfill_complete'] === 1 && (int) $newState['wh_backfill_complete'] === 1
+    );
+    $displayFromDate = $fromDate !== '' ? $fromDate : $whFromDate;
+    $displayToDate = $toDate !== '' ? $toDate : $whToDate;
 
     return [
         'ok' => true,
         'company' => $company,
         'sync_phase' => 'backfill',
         'mode' => $modeLabel,
-        'from_date' => $fromDate,
-        'to_date' => $toDate,
-        'fetched_count' => count($fetchedEntries),
-        'inserted_count' => $inserted,
+        'from_date' => $displayFromDate,
+        'to_date' => $displayToDate,
+        'fetched_count' => count($scanFetched) + count($whFetched),
+        'inserted_count' => $insertedScans + $insertedWh,
+        'inserted_scans' => $insertedScans,
+        'inserted_wh' => $insertedWh,
         'chunk_current' => $chunkProgress['chunk_current'],
         'chunk_total' => $chunkProgress['chunk_total'],
         'sync_state' => $newState,
-        'sync_complete' => (int) $newState['backfill_complete'] === 1,
-        'needs_more_chunks' => (int) $newState['backfill_complete'] !== 1,
+        'sync_complete' => (int) $newState['backfill_complete'] === 1 && (int) $newState['wh_backfill_complete'] === 1,
+        'needs_more_chunks' => mithra_sync_needs_backfill_chunks($newState),
     ];
 }
 
@@ -436,8 +624,10 @@ function mithra_overview_payload(string $company): array
     $fromDate = mithra_heatmap_grid_from_date($today);
 
     $users = [];
-    foreach (mithra_store_list_usernames($company) as $username) {
-        $counts = mithra_store_daily_counts($company, $username, $fromDate, $today);
+    foreach (mithra_store_list_activity_usernames($company) as $username) {
+        $scanCounts = mithra_store_daily_counts($company, $username, $fromDate, $today);
+        $whCounts = mithra_wh_store_daily_counts($company, $username, $fromDate, $today);
+        $counts = mithra_store_merge_daily_counts($scanCounts, $whCounts);
         $days = mithra_heatmap_build_grid_days($counts, $today);
 
         $users[] = [
