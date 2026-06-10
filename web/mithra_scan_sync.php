@@ -618,23 +618,33 @@ function mithra_sync_one_chunk(string $company): array
     return mithra_sync_run($company);
 }
 
+function mithra_overview_build_users(string $company, string $fromDate, string $toDate, string $today): array
+{
+    $groups = mithra_store_activity_username_groups($company);
+    if ($groups === []) {
+        return [];
+    }
+
+    $scanByUser = mithra_store_company_scan_daily_counts($company, $fromDate, $toDate);
+    $whByUser = mithra_wh_store_company_daily_counts($company, $fromDate, $toDate);
+
+    $users = [];
+    foreach ($groups as $group) {
+        $counts = mithra_store_collect_group_daily_counts($group, $scanByUser, $whByUser);
+        $users[] = [
+            'username' => (string) ($group['username'] ?? ''),
+            'days' => mithra_heatmap_build_grid_days($counts, $today),
+        ];
+    }
+
+    return $users;
+}
+
 function mithra_overview_payload(string $company): array
 {
     $today = mithra_sync_today_date();
     $fromDate = mithra_heatmap_grid_from_date($today);
-
-    $users = [];
-    foreach (mithra_store_list_activity_usernames($company) as $username) {
-        $scanCounts = mithra_store_merged_scan_daily_counts($company, $username, $fromDate, $today);
-        $whCounts = mithra_store_merged_wh_daily_counts($company, $username, $fromDate, $today);
-        $counts = mithra_store_merge_daily_counts($scanCounts, $whCounts);
-        $days = mithra_heatmap_build_grid_days($counts, $today);
-
-        $users[] = [
-            'username' => $username,
-            'days' => $days,
-        ];
-    }
+    $users = mithra_overview_build_users($company, $fromDate, $today, $today);
 
     usort($users, 'mithra_heatmap_compare_users_by_activity');
 

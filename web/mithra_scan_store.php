@@ -321,6 +321,50 @@ function mithra_store_daily_counts(string $company, string $username, string $fr
     return $counts;
 }
 
+function mithra_store_company_scan_daily_counts(string $company, string $fromDate, string $toDate): array
+{
+    $companyKey = mithra_store_company_key($company);
+    $from = mithra_normalize_date_only($fromDate);
+    $to = mithra_normalize_date_only($toDate);
+    if ($from === '' || $to === '') {
+        return [];
+    }
+
+    $db = mithra_store_open_db();
+    $stmt = $db->prepare('SELECT username, substr(scan_timestamp, 1, 10) AS scan_date, COUNT(*) AS scan_count
+        FROM scan_entries
+        WHERE company = :company
+          AND substr(scan_timestamp, 1, 10) >= :from_date
+          AND substr(scan_timestamp, 1, 10) <= :to_date
+        GROUP BY username, substr(scan_timestamp, 1, 10)
+        ORDER BY username ASC, scan_date ASC');
+    $stmt->bindValue(':company', $companyKey, SQLITE3_TEXT);
+    $stmt->bindValue(':from_date', $from, SQLITE3_TEXT);
+    $stmt->bindValue(':to_date', $to, SQLITE3_TEXT);
+    $result = $stmt->execute();
+
+    $byUser = [];
+    if ($result instanceof SQLite3Result) {
+        while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $username = trim((string) ($row['username'] ?? ''));
+            $date = trim((string) ($row['scan_date'] ?? ''));
+            if ($username === '' || $date === '') {
+                continue;
+            }
+
+            $byUser[$username][$date] = (int) ($row['scan_count'] ?? 0);
+        }
+        $result->finalize();
+    }
+    $db->close();
+
+    return $byUser;
+}
+
 function mithra_store_user_entries(string $company, string $username): array
 {
     $companyKey = mithra_store_company_key($company);

@@ -151,6 +151,50 @@ function mithra_wh_store_daily_counts(string $company, string $username, string 
     return $counts;
 }
 
+function mithra_wh_store_company_daily_counts(string $company, string $fromDate, string $toDate): array
+{
+    $companyKey = mithra_store_company_key($company);
+    $from = mithra_normalize_date_only($fromDate);
+    $to = mithra_normalize_date_only($toDate);
+    if ($from === '' || $to === '') {
+        return [];
+    }
+
+    $db = mithra_store_open_db();
+    $stmt = $db->prepare('SELECT username, substr(activity_timestamp, 1, 10) AS activity_date, COUNT(*) AS activity_count
+        FROM warehouse_entries
+        WHERE company = :company
+          AND substr(activity_timestamp, 1, 10) >= :from_date
+          AND substr(activity_timestamp, 1, 10) <= :to_date
+        GROUP BY username, substr(activity_timestamp, 1, 10)
+        ORDER BY username ASC, activity_date ASC');
+    $stmt->bindValue(':company', $companyKey, SQLITE3_TEXT);
+    $stmt->bindValue(':from_date', $from, SQLITE3_TEXT);
+    $stmt->bindValue(':to_date', $to, SQLITE3_TEXT);
+    $result = $stmt->execute();
+
+    $byUser = [];
+    if ($result instanceof SQLite3Result) {
+        while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $username = trim((string) ($row['username'] ?? ''));
+            $date = trim((string) ($row['activity_date'] ?? ''));
+            if ($username === '' || $date === '') {
+                continue;
+            }
+
+            $byUser[$username][$date] = (int) ($row['activity_count'] ?? 0);
+        }
+        $result->finalize();
+    }
+    $db->close();
+
+    return $byUser;
+}
+
 function mithra_wh_store_user_entries(string $company, string $username): array
 {
     $companyKey = mithra_store_company_key($company);
@@ -180,31 +224,95 @@ function mithra_wh_store_user_entries(string $company, string $username): array
     return $entries;
 }
 
-function mithra_store_list_activity_usernames(string $company): array
+function mithra_store_build_activity_username_groups(array $usernames): array
 {
-    $combined = array_merge(
-        mithra_store_list_usernames($company),
-        mithra_wh_store_list_usernames($company)
-    );
-    $unique = [];
-    foreach ($combined as $username) {
-        $matchKey = mithra_username_match_key($username);
+    $groupsByKey = [];
+    foreach ($usernames as $username) {
+        $name = trim((string) $username);
+        if ($name === '') {
+            continue;
+        }
+
+        $matchKey = mithra_username_match_key($name);
         if ($matchKey === '') {
             continue;
         }
 
-        $canonical = mithra_normalize_username($username);
+        $canonical = mithra_normalize_username($name);
         if ($canonical === '') {
-            $canonical = trim((string) $username);
+            $canonical = $name;
         }
 
-        if (!isset($unique[$matchKey])) {
-            $unique[$matchKey] = $canonical;
+        if (!isset($groupsByKey[$matchKey])) {
+            $groupsByKey[$matchKey] = [
+                'match_key' => $matchKey,
+                'username' => $canonical,
+                'variants' => [],
+            ];
+        }
+
+        $groupsByKey[$matchKey]['variants'][$name] = $name;
+    }
+
+    $groups = array_values($groupsByKey);
+    foreach ($groups as &$group) {
+        $group['variants'] = array_values($group['variants']);
+    }
+    unset($group);
+
+    usort($groups, static function (array $a, array $b): int {
+        return strnatcasecmp((string) ($a['username'] ?? ''), (string) ($b['username'] ?? ''));
+    });
+
+    return $groups;
+}
+
+function mithra_store_activity_username_groups(string $company): array
+{
+    static $cache = [];
+    $companyKey = mithra_store_company_key($company);
+    if (isset($cache[$companyKey])) {
+        return $cache[$companyKey];
+    }
+
+    $cache[$companyKey] = mithra_store_build_activity_username_groups(array_merge(
+        mithra_store_list_usernames($company),
+        mithra_wh_store_list_usernames($company)
+    ));
+
+    return $cache[$companyKey];
+}
+
+function mithra_store_collect_group_daily_counts(array $group, array $scanByUser, array $whByUser): array
+{
+    $counts = [];
+    foreach ($group['variants'] ?? [] as $variant) {
+        $variantKey = trim((string) $variant);
+        if ($variantKey === '') {
+            continue;
+        }
+
+        if (isset($scanByUser[$variantKey])) {
+            $counts = mithra_store_merge_daily_counts($counts, $scanByUser[$variantKey]);
+        }
+
+        if (isset($whByUser[$variantKey])) {
+            $counts = mithra_store_merge_daily_counts($counts, $whByUser[$variantKey]);
         }
     }
 
-    $usernames = array_values($unique);
-    sort($usernames, SORT_NATURAL | SORT_FLAG_CASE);
+    return $counts;
+}
+
+function mithra_store_list_activity_usernames(string $company): array
+{
+    $usernames = [];
+    foreach (mithra_store_activity_username_groups($company) as $group) {
+        $username = trim((string) ($group['username'] ?? ''));
+        if ($username !== '') {
+            $usernames[] = $username;
+        }
+    }
 
     return $usernames;
 }
@@ -216,16 +324,13 @@ function mithra_store_activity_username_variants(string $company, string $userna
         return [];
     }
 
-    $variants = [];
-    foreach (array_merge(mithra_store_list_usernames($company), mithra_wh_store_list_usernames($company)) as $name) {
-        if (mithra_username_match_key($name) !== $targetKey) {
-            continue;
+    foreach (mithra_store_activity_username_groups($company) as $group) {
+        if ((string) ($group['match_key'] ?? '') === $targetKey) {
+            return is_array($group['variants'] ?? null) ? $group['variants'] : [];
         }
-
-        $variants[$name] = trim((string) $name);
     }
 
-    return array_values($variants);
+    return [];
 }
 
 function mithra_store_merged_scan_daily_counts(string $company, string $username, string $fromDate, string $toDate): array

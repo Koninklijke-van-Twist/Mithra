@@ -16,7 +16,6 @@ require_once __DIR__ . '/mithra_scan_store.php';
 require_once __DIR__ . '/mithra_scan_sync.php';
 require_once __DIR__ . '/mithra_stats.php';
 require_once __DIR__ . '/mithra_preferences.php';
-require_once __DIR__ . '/mithra_heatmap_image.php';
 
 /**
  * Functies
@@ -563,12 +562,32 @@ if (mithra_action_is('user_detail')) {
         }
 
         .modal-heatmap-panel[aria-busy="true"] .modal-heatmap-placeholder {
-            animation: modal-heatmap-pulse 1.2s ease-in-out infinite;
+            animation: heatmap-placeholder-pulse 1.2s ease-in-out infinite;
         }
 
-        @keyframes modal-heatmap-pulse {
+        @keyframes heatmap-placeholder-pulse {
             0%, 100% { opacity: 0.72; }
             50% { opacity: 1; }
+        }
+
+        .user-card-heatmap-placeholder {
+            width: <?= (int) $cardHeatmapDims['width'] ?>px;
+            height: <?= (int) $cardHeatmapDims['height'] ?>px;
+            flex: 0 0 auto;
+            border-radius: 4px;
+            background: linear-gradient(180deg, #f7fbff 0%, #eef6fc 100%);
+        }
+
+        .user-card-stats-placeholder {
+            flex: 1 1 auto;
+            min-height: 38px;
+            border-radius: 4px;
+            background: linear-gradient(180deg, #f7fbff 0%, #eef6fc 100%);
+        }
+
+        .user-card-loading .user-card-heatmap-placeholder,
+        .user-card-loading .user-card-stats-placeholder {
+            animation: heatmap-placeholder-pulse 1.2s ease-in-out infinite;
         }
 
         .heatmap {
@@ -925,6 +944,8 @@ if (mithra_action_is('user_detail')) {
             const heatmapSvgPad = 1;
             let modalHeatmapRenderToken = 0;
             let modalFetchController = null;
+            let cardHydrateToken = 0;
+            let overviewRefreshTimer = null;
             let isSyncing = false;
             let overviewUsers = [];
             let hiddenUsernames = new Set();
@@ -1258,18 +1279,71 @@ if (mithra_action_is('user_detail')) {
                 return medal === '' ? name : (name + ' ' + medal);
             }
 
-            function buildUserCardElement(user)
+            function buildUserCardSkeleton(user)
             {
-                const days = Array.isArray(user.days) ? user.days : [];
                 const username = String(user.username || '');
                 const card = document.createElement('article');
-                card.className = 'user-card';
+                card.className = 'user-card user-card-loading';
+                card.dataset.username = username;
                 card.innerHTML = '<h3 class="user-card-name">' + escapeHtml(userDisplayNameWithMedal(username)) + '</h3>'
                     + '<div class="user-card-body">'
-                    + renderUserCardHeatmap(days)
-                    + renderUserCardStats(days)
+                    + '<div class="user-card-heatmap-placeholder" aria-hidden="true"></div>'
+                    + '<div class="user-card-stats-placeholder" aria-hidden="true"></div>'
                     + '</div>';
                 bindUserCard(card, user);
+                return card;
+            }
+
+            function hydrateUserCard(card, user)
+            {
+                const days = Array.isArray(user.days) ? user.days : [];
+                const body = card.querySelector('.user-card-body');
+                if (!body)
+                {
+                    return;
+                }
+
+                card.classList.remove('user-card-loading');
+                body.innerHTML = renderUserCardHeatmap(days) + renderUserCardStats(days);
+            }
+
+            function scheduleHydrateUserCards(entries)
+            {
+                if (!Array.isArray(entries) || entries.length === 0)
+                {
+                    return;
+                }
+
+                const token = ++cardHydrateToken;
+                let index = 0;
+                const cardsPerFrame = 4;
+
+                function hydrateBatch()
+                {
+                    if (token !== cardHydrateToken)
+                    {
+                        return;
+                    }
+
+                    const end = Math.min(index + cardsPerFrame, entries.length);
+                    for (; index < end; index++)
+                    {
+                        hydrateUserCard(entries[index].card, entries[index].user);
+                    }
+
+                    if (index < entries.length)
+                    {
+                        window.requestAnimationFrame(hydrateBatch);
+                    }
+                }
+
+                window.requestAnimationFrame(hydrateBatch);
+            }
+
+            function buildUserCardElement(user)
+            {
+                const card = buildUserCardSkeleton(user);
+                hydrateUserCard(card, user);
                 return card;
             }
 
@@ -1317,8 +1391,10 @@ if (mithra_action_is('user_detail')) {
 
                 hidingUserKeys.clear();
                 fadingCards.clear();
+                cardHydrateToken++;
                 userGrid.innerHTML = '';
 
+                const hydrateEntries = [];
                 for (const user of overviewUsers)
                 {
                     const username = String(user.username || '');
@@ -1327,8 +1403,12 @@ if (mithra_action_is('user_detail')) {
                         continue;
                     }
 
-                    userGrid.appendChild(buildUserCardElement(user));
+                    const card = buildUserCardSkeleton(user);
+                    userGrid.appendChild(card);
+                    hydrateEntries.push({ card: card, user: user });
                 }
+
+                scheduleHydrateUserCards(hydrateEntries);
 
                 if (!skipHiddenList)
                 {
@@ -1453,7 +1533,7 @@ if (mithra_action_is('user_detail')) {
                 renderHiddenUsersList();
 
                 const user = findOverviewUser(username);
-                const card = buildUserCardElement(user);
+                const card = buildUserCardSkeleton(user);
                 const insertBefore = findInsertBeforeElement(username);
                 if (insertBefore)
                 {
@@ -1463,6 +1543,8 @@ if (mithra_action_is('user_detail')) {
                 {
                     userGrid.appendChild(card);
                 }
+
+                scheduleHydrateUserCards([{ card: card, user: user }]);
 
                 schedulePersistHidden();
             }
@@ -1920,8 +2002,10 @@ if (mithra_action_is('user_detail')) {
                 userModal.setAttribute('aria-hidden', 'true');
             }
 
-            async function fetchOverview()
+            async function fetchOverview(options)
             {
+                options = options || {};
+
                 await flushHiddenState();
 
                 const company = selectedCompany();
@@ -1938,8 +2022,29 @@ if (mithra_action_is('user_detail')) {
                     throw new Error((payload && payload.error) || 'Overzicht laden mislukt.');
                 }
 
-                renderOverview(payload, { keepHiddenState: hiddenPersistDirty });
+                renderOverview(payload, { keepHiddenState: hiddenPersistDirty || !!options.keepHiddenState });
                 return payload;
+            }
+
+            function scheduleOverviewRefresh(options)
+            {
+                options = options || {};
+                window.clearTimeout(overviewRefreshTimer);
+                overviewRefreshTimer = null;
+
+                if (options.immediate)
+                {
+                    return fetchOverview({ keepHiddenState: true });
+                }
+
+                return new Promise(function (resolve, reject)
+                {
+                    overviewRefreshTimer = window.setTimeout(function ()
+                    {
+                        overviewRefreshTimer = null;
+                        fetchOverview({ keepHiddenState: true }).then(resolve).catch(reject);
+                    }, 450);
+                });
             }
 
             async function saveCompanyPreference(company)
@@ -2023,7 +2128,7 @@ if (mithra_action_is('user_detail')) {
                         if (payload.sync_phase === 'forward')
                         {
                             statusText.textContent = formatForwardSyncStatus(payload);
-                            await fetchOverview();
+                            await scheduleOverviewRefresh({ immediate: true });
                             break;
                         }
 
@@ -2033,9 +2138,10 @@ if (mithra_action_is('user_detail')) {
                         const chunkTotal = Number(payload.chunk_total || chunkTotalEstimate);
                         statusText.innerHTML = formatBackfillChunkStatus(payload, chunkCurrent, chunkTotal);
 
-                        await fetchOverview();
+                        const isLastChunk = !payload.needs_more_chunks;
+                        await scheduleOverviewRefresh({ immediate: isLastChunk });
 
-                        if (!payload.needs_more_chunks)
+                        if (isLastChunk)
                         {
                             statusText.innerHTML = 'Gegevens geladen.';
                             break;

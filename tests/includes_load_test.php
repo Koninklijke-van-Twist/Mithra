@@ -18,6 +18,8 @@ mithra_test('alle Mithra-modules laden zonder redeclare-fout', static function (
     mithra_assert_true(function_exists('mithra_heatmap_build_grid_days'));
     mithra_assert_true(function_exists('mithra_stats_dual_block'));
     mithra_assert_true(function_exists('mithra_wh_row_to_entry'));
+    mithra_assert_true(function_exists('mithra_overview_build_users'));
+    mithra_assert_true(function_exists('mithra_store_company_scan_daily_counts'));
 });
 
 mithra_test('mithra_normalize_date_only staat alleen in mithra_bc.php', static function (): void {

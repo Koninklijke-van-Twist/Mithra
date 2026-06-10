@@ -181,6 +181,16 @@ function mithra_heatmap_png_dimensions(?int $rows = null, ?int $cols = null, ?in
     ];
 }
 
+function mithra_heatmap_card_display_dimensions(?int $rows = null, ?int $cols = null): array
+{
+    return mithra_heatmap_png_dimensions(
+        $rows,
+        $cols,
+        MITHRA_HEATMAP_CELL_PX,
+        MITHRA_HEATMAP_CELL_GAP
+    );
+}
+
 function mithra_heatmap_activity_level(int $count, int $intensityMax = MITHRA_HEATMAP_INTENSITY_MAX): string
 {
     if ($count <= 0) {
