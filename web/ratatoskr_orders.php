@@ -51,12 +51,21 @@ function ratatoskr_company_entity_url_with_query(string $company, string $entity
         $targetEnvironment = auth_get_environment_for_company($companyName, 300);
     }
 
-    if ($targetEnvironment === '') {
+    // Mímir-modus: OData-URL's worden in odata_get_all vertaald; BC baseUrl/auth zijn dan niet nodig.
+    if (!function_exists('odata_mimir_enabled')) {
+        $odataPath = __DIR__ . '/odata.php';
+        if (is_file($odataPath)) {
+            require_once $odataPath;
+        }
+    }
+    $mimirEnabled = function_exists('odata_mimir_enabled') && odata_mimir_enabled();
+
+    if ($targetEnvironment === '' && !$mimirEnabled) {
         throw new RuntimeException('Geen environment beschikbaar.');
     }
 
     $base = trim((string) ($baseUrl ?? ''));
-    if ($base === '') {
+    if ($base === '' && !$mimirEnabled) {
         throw new RuntimeException('baseUrl ontbreekt in auth.php.');
     }
 
@@ -257,6 +266,16 @@ function ratatoskr_ttl_for_open_order_age(?int $ageDays): int
 
 function ratatoskr_odata_get_all_uncached(string $url, array $auth): array
 {
+    if (function_exists('odata_mimir_enabled') && odata_mimir_enabled()) {
+        // Geen lokale filecache. odata_get_json gaat naar Mímir (max_age 0).
+        $resp = odata_get_json($url, $auth);
+        $rows = $resp['value'] ?? null;
+        if (!is_array($rows)) {
+            throw new Exception("OData response missing 'value' array");
+        }
+        return $rows;
+    }
+
     $all = [];
     $next = $url;
 
@@ -275,6 +294,11 @@ function ratatoskr_odata_get_all_uncached(string $url, array $auth): array
 
 function ratatoskr_odata_is_valid_cache_entry(string $url, array $auth, int $ttlSeconds): bool
 {
+    if (function_exists('odata_mimir_enabled') && odata_mimir_enabled()) {
+        // Mímir beheert de cache; achtergebleven BC-bestanden tellen niet.
+        return false;
+    }
+
     $safeTtl = max(1, $ttlSeconds);
     $cacheKey = build_cache_key($url, $auth);
     $cachePath = cache_path_for_key($cacheKey);
@@ -289,6 +313,15 @@ function ratatoskr_odata_is_valid_cache_entry(string $url, array $auth, int $ttl
 
 function ratatoskr_odata_get_all_with_cache_flag(string $url, array $auth, int $ttlSeconds): array
 {
+    if (function_exists('odata_mimir_enabled') && odata_mimir_enabled()) {
+        // Mímir beheert de BC-cache (max_age); lokale OData-filecache wordt overgeslagen.
+        $rows = odata_get_all($url, $auth, max(0, $ttlSeconds));
+        return [
+            'rows' => $rows,
+            'from_cache' => false,
+        ];
+    }
+
     $safeTtl = max(1, $ttlSeconds);
     $cacheKey = build_cache_key($url, $auth);
     $cachePath = cache_path_for_key($cacheKey);

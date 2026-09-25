@@ -42,12 +42,21 @@ function mithra_company_entity_url(string $company, array $query, ?string $envir
         $targetEnvironment = auth_get_environment_for_company($companyName, MITHRA_ODATA_TTL);
     }
 
-    if ($targetEnvironment === '') {
+    // Mímir-modus: OData-URL's worden in odata_get_all vertaald; BC baseUrl/auth zijn dan niet nodig.
+    if (!function_exists('odata_mimir_enabled')) {
+        $odataPath = __DIR__ . '/odata.php';
+        if (is_file($odataPath)) {
+            require_once $odataPath;
+        }
+    }
+    $mimirEnabled = function_exists('odata_mimir_enabled') && odata_mimir_enabled();
+
+    if ($targetEnvironment === '' && !$mimirEnabled) {
         throw new RuntimeException('Geen environment beschikbaar.');
     }
 
     $base = trim((string) ($baseUrl ?? ''));
-    if ($base === '') {
+    if ($base === '' && !$mimirEnabled) {
         throw new RuntimeException('baseUrl ontbreekt in auth.php.');
     }
 
