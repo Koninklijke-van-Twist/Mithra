@@ -12,7 +12,7 @@ alwaysApply: true
 
 ## Niet wijzigen
 - `web/logincheck.php` niet aanpassen.
-- `web/odata.php` niet aanpassen.
+- `web/odata.php` niet aanpassen. Uitzondering: de Mímir-naar-BC-fallback in dat bestand (goedgekeurd door Tim Falken op 2026-09-28).
 - `web/auth.php` alleen aanpassen na expliciete gebruikersvraag.
 
 ## Data en logica

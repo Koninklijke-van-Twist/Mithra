@@ -432,6 +432,98 @@ if (strpos(mimir_fallback_log(), 'sandbox-secret') !== false || strpos(mimir_fal
     mimir_fallback_fail('log bevat een environment-wachtwoord');
 }
 
+$mimirFailureMessages = [
+    'Mímir HTTP 400: bad request',
+    'Mímir HTTP 401: unauthorized',
+    'Mímir HTTP 404: missing',
+    'Mímir gaf ongeldige JSON terug.',
+    'Mímir error: upstream said no',
+    "Mímir query-antwoord mist 'value'.",
+    "Mímir companies-antwoord mist 'value'.",
+];
+foreach ($mimirFailureMessages as $mimirFailureMessage) {
+    odata_mimir_circuit_reset();
+    $loggedBeforeFailure = mimir_fallback_count();
+    $failureRows = odata_mimir_or_direct(
+        static function () use ($mimirFailureMessage): array {
+            throw new Exception($mimirFailureMessage);
+        },
+        static function (): array {
+            return [['No' => 'WO-FAIL']];
+        }
+    );
+    if (($failureRows[0]['No'] ?? '') !== 'WO-FAIL' || !odata_mimir_circuit_open() || mimir_fallback_count() !== $loggedBeforeFailure + 1) {
+        mimir_fallback_fail('Mímir-fout moet terugvallen en het circuit openen: ' . $mimirFailureMessage);
+    }
+}
+
+$callerErrorMessages = [
+    'Mímir: OData-URL kon niet worden vertaald naar company/table: https://bc.example/x',
+    'Mímir request JSON encode mislukt.',
+];
+foreach ($callerErrorMessages as $callerErrorMessage) {
+    odata_mimir_circuit_reset();
+    $loggedBeforeCallerError = mimir_fallback_count();
+    $beforeCallerError = count($calls);
+    $callerErrorRows = odata_mimir_or_direct(
+        static function () use ($callerErrorMessage): array {
+            throw new Exception($callerErrorMessage);
+        },
+        static function () use (&$calls): array {
+            $calls[] = ['url' => 'direct-caller-error', 'user' => 'bcuser', 'ttl' => 1];
+            return [['No' => 'WO-CALLER']];
+        }
+    );
+    $callerErrorCall = $calls[count($calls) - 1] ?? null;
+    if (($callerErrorRows[0]['No'] ?? '') !== 'WO-CALLER' || !is_array($callerErrorCall) || $callerErrorCall['url'] !== 'direct-caller-error') {
+        mimir_fallback_fail('aanroeperfout moet voor deze call terugvallen op BC: ' . $callerErrorMessage);
+    }
+    if (odata_mimir_circuit_open() || mimir_fallback_count() !== $loggedBeforeCallerError || count($calls) !== $beforeCallerError + 1) {
+        mimir_fallback_fail('aanroeperfout mag het circuit niet openen of een fallback loggen: ' . $callerErrorMessage);
+    }
+}
+
+odata_mimir_circuit_reset();
+$loggedBeforeUntranslated = mimir_fallback_count();
+$beforeUntranslated = count($calls);
+$untranslatedUrl = 'https://bc.example:7148/Production/ODataV4/CustomEndpoint';
+$untranslatedRows = odata_get_all($untranslatedUrl, $auth, 12);
+$untranslatedCall = $calls[$beforeUntranslated] ?? null;
+if (($untranslatedRows[0]['No'] ?? '') !== 'WO-1' || !is_array($untranslatedCall) || $untranslatedCall['url'] !== $untranslatedUrl || $untranslatedCall['user'] !== 'bcuser') {
+    mimir_fallback_fail('onvertaalbare URL viel niet terug op de oorspronkelijke BC-URL: ' . json_encode($untranslatedCall));
+}
+if (odata_mimir_circuit_open() || mimir_fallback_count() !== $loggedBeforeUntranslated) {
+    mimir_fallback_fail('een onvertaalbare URL mag het circuit niet openen');
+}
+
+odata_mimir_circuit_reset();
+$auth_list['Sandbox'] = ['mode' => 'basic', 'user' => '', 'pass' => 'sandbox-secret'];
+$GLOBALS['auth_list'] = $auth_list;
+$loggedBeforeUnusable = mimir_fallback_count();
+$beforeUnusable = count($calls);
+$unusableCaught = null;
+try {
+    odata_get_all(
+        "https://mimir.invalid/Sandbox/ODataV4/Company('Hunter%20van%20Twist')/AppResource?\$select=No",
+        $auth,
+        10
+    );
+    mimir_fallback_fail('Sandbox zonder bruikbare credentials mag niet met Production-auth worden opgehaald');
+} catch (Throwable $exception) {
+    $unusableCaught = $exception;
+}
+if (!$unusableCaught instanceof Throwable || strpos($unusableCaught->getMessage(), 'Mímir') === false) {
+    mimir_fallback_fail('Sandbox zonder credentials gooide niet de Mímir-fout terug');
+}
+if (count($calls) !== $beforeUnusable) {
+    mimir_fallback_fail('Sandbox zonder credentials stuurde toch een directe fetch: ' . json_encode($calls[$beforeUnusable] ?? null));
+}
+if (!odata_mimir_circuit_open() || mimir_fallback_count() !== $loggedBeforeUnusable + 1) {
+    mimir_fallback_fail('de Mímir-fout zelf moet het circuit nog wel openen');
+}
+$auth_list['Sandbox'] = ['mode' => 'basic', 'user' => 'sandbox-user', 'pass' => 'sandbox-secret'];
+$GLOBALS['auth_list'] = $auth_list;
+
 $globalsAuthPath = sys_get_temp_dir() . '/mithra-auth-globals-' . getmypid() . '.php';
 $baseOnlyAuthPath = sys_get_temp_dir() . '/mithra-auth-base-only-' . getmypid() . '.php';
 $mimirFallbackTempAuths = [$globalsAuthPath, $baseOnlyAuthPath];
