@@ -340,7 +340,7 @@ function ratatoskr_fetch_open_order_candidates(string $company, int $ttl = RATAT
     $openOrderLowerBound = ratatoskr_open_order_lower_bound($company);
     $openOrderFilter = ratatoskr_build_open_orders_filter($openOrderLowerBound);
     $url = ratatoskr_company_entity_url_with_query($company, 'PurchaseOrders', [
-        '$select' => 'No,LVS_Order_Date,Document_Date,Posting_Date,Buy_from_Vendor_No,Buy_from_Vendor_Name,LVS_Ex_Factory_Date,LVS_Date_on_Board,LVS_Expected_Receipt_Date,LVS_Completely_Received,Status,Vendor_Order_No',
+        '$select' => 'No,LVS_Order_Date,Document_Date,Posting_Date,Buy_from_Vendor_No,Buy_from_Vendor_Name,Status,Vendor_Order_No',
         '$filter' => $openOrderFilter,
         '$orderby' => 'LVS_Order_Date desc,No desc',
     ], $environment);
@@ -547,7 +547,7 @@ function ratatoskr_fetch_order_detail(string $company, string $orderNo, bool $re
     $receivedDate = '';
     if ($receivedFlag || (bool) ($orderRow['LVS_Completely_Received'] ?? false)) {
         $receiptUrl = ratatoskr_company_entity_url_with_query($company, 'PostedPurchaseReceipt', [
-            '$select' => 'Order_No,Posting_Date,Document_Date,Buy_from_Vendor_Name,Buy_from_Vendor_No',
+            '$select' => 'Posting_Date,Document_Date',
             '$filter' => "Order_No eq '" . str_replace("'", "''", $orderNoText) . "'",
             '$orderby' => 'Posting_Date desc',
         ], $environment);
@@ -571,7 +571,7 @@ function ratatoskr_fetch_order_detail(string $company, string $orderNo, bool $re
 
         if ($receivedDate === '') {
             $receiptLineUrl = ratatoskr_company_entity_url_with_query($company, 'PostedPurchaseReceiptLines', [
-                '$select' => 'Document_No,Order_No',
+                '$select' => 'Document_No',
                 '$filter' => "Order_No eq '" . str_replace("'", "''", $orderNoText) . "'",
                 '$orderby' => 'Document_No desc,Line_No asc',
             ], $environment);
@@ -596,7 +596,7 @@ function ratatoskr_fetch_order_detail(string $company, string $orderNo, bool $re
 
             if ($documentNo !== '') {
                 $receiptByDocumentUrl = ratatoskr_company_entity_url_with_query($company, 'PostedPurchaseReceipt', [
-                    '$select' => 'No,Posting_Date,Document_Date',
+                    '$select' => 'Posting_Date,Document_Date',
                     '$filter' => "No eq '" . str_replace("'", "''", $documentNo) . "'",
                 ], $environment);
                 if ($useCache) {
