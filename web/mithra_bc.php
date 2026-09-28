@@ -30,8 +30,6 @@ function mithra_discover_companies(): array
 
 function mithra_company_entity_url(string $company, array $query, ?string $environment = null, ?string $entity = null): string
 {
-    global $baseUrl;
-
     $companyName = trim($company);
     if ($companyName === '') {
         throw new RuntimeException('Geen bedrijf geselecteerd.');
@@ -42,22 +40,11 @@ function mithra_company_entity_url(string $company, array $query, ?string $envir
         $targetEnvironment = auth_get_environment_for_company($companyName, MITHRA_ODATA_TTL);
     }
 
-    // Mímir-modus: OData-URL's worden in odata_get_all vertaald; BC baseUrl/auth zijn dan niet nodig.
-    if (!function_exists('odata_mimir_enabled')) {
+    if (!function_exists('odata_entity_url_prefix')) {
         $odataPath = __DIR__ . '/odata.php';
         if (is_file($odataPath)) {
             require_once $odataPath;
         }
-    }
-    $mimirEnabled = function_exists('odata_mimir_enabled') && odata_mimir_enabled();
-
-    if ($targetEnvironment === '' && !$mimirEnabled) {
-        throw new RuntimeException('Geen environment beschikbaar.');
-    }
-
-    $base = trim((string) ($baseUrl ?? ''));
-    if ($base === '' && !$mimirEnabled) {
-        throw new RuntimeException('baseUrl ontbreekt in auth.php.');
     }
 
     $entityName = trim((string) ($entity ?? MITHRA_BC_ENTITY));
@@ -67,7 +54,7 @@ function mithra_company_entity_url(string $company, array $query, ?string $envir
 
     $safeCompany = str_replace("'", "''", $companyName);
     $companySegment = "Company('" . rawurlencode($safeCompany) . "')";
-    $url = rtrim($base, '/') . '/' . rawurlencode($targetEnvironment) . '/ODataV4/' . $companySegment . '/' . rawurlencode($entityName);
+    $url = odata_entity_url_prefix($targetEnvironment) . $companySegment . '/' . rawurlencode($entityName);
 
     if ($query !== []) {
         $url .= '?' . http_build_query($query, '', '&', PHP_QUERY_RFC3986);

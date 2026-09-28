@@ -39,8 +39,6 @@ function ratatoskr_discover_companies(): array
 
 function ratatoskr_company_entity_url_with_query(string $company, string $entitySet, array $query, ?string $environment = null): string
 {
-    global $baseUrl;
-
     $companyName = trim($company);
     if ($companyName === '') {
         throw new RuntimeException('Geen bedrijf geselecteerd.');
@@ -51,27 +49,16 @@ function ratatoskr_company_entity_url_with_query(string $company, string $entity
         $targetEnvironment = auth_get_environment_for_company($companyName, 300);
     }
 
-    // Mímir-modus: OData-URL's worden in odata_get_all vertaald; BC baseUrl/auth zijn dan niet nodig.
-    if (!function_exists('odata_mimir_enabled')) {
+    if (!function_exists('odata_entity_url_prefix')) {
         $odataPath = __DIR__ . '/odata.php';
         if (is_file($odataPath)) {
             require_once $odataPath;
         }
     }
-    $mimirEnabled = function_exists('odata_mimir_enabled') && odata_mimir_enabled();
-
-    if ($targetEnvironment === '' && !$mimirEnabled) {
-        throw new RuntimeException('Geen environment beschikbaar.');
-    }
-
-    $base = trim((string) ($baseUrl ?? ''));
-    if ($base === '' && !$mimirEnabled) {
-        throw new RuntimeException('baseUrl ontbreekt in auth.php.');
-    }
 
     $safeCompany = str_replace("'", "''", $companyName);
     $companySegment = "Company('" . rawurlencode($safeCompany) . "')";
-    $url = rtrim($base, '/') . '/' . rawurlencode($targetEnvironment) . '/ODataV4/' . $companySegment . '/' . rawurlencode($entitySet);
+    $url = odata_entity_url_prefix($targetEnvironment) . $companySegment . '/' . rawurlencode($entitySet);
 
     if ($query !== []) {
         $url .= '?' . http_build_query($query, '', '&', PHP_QUERY_RFC3986);
@@ -266,8 +253,8 @@ function ratatoskr_ttl_for_open_order_age(?int $ageDays): int
 
 function ratatoskr_odata_get_all_uncached(string $url, array $auth): array
 {
-    if (function_exists('odata_mimir_enabled') && odata_mimir_enabled()) {
-        // Geen lokale filecache. odata_get_json gaat naar Mímir (max_age 0).
+    if (function_exists('odata_mimir_should_proxy') && odata_mimir_should_proxy()) {
+        // Geen lokale filecache zolang Mímir bereikbaar is. odata_get_json gaat naar Mímir (max_age 0).
         $resp = odata_get_json($url, $auth);
         $rows = $resp['value'] ?? null;
         if (!is_array($rows)) {
@@ -294,8 +281,9 @@ function ratatoskr_odata_get_all_uncached(string $url, array $auth): array
 
 function ratatoskr_odata_is_valid_cache_entry(string $url, array $auth, int $ttlSeconds): bool
 {
-    if (function_exists('odata_mimir_enabled') && odata_mimir_enabled()) {
+    if (function_exists('odata_mimir_should_proxy') && odata_mimir_should_proxy()) {
         // Mímir beheert de cache; achtergebleven BC-bestanden tellen niet.
+        // Na een Mímir-fout (circuit open) geldt de lokale filecache weer.
         return false;
     }
 
@@ -313,8 +301,9 @@ function ratatoskr_odata_is_valid_cache_entry(string $url, array $auth, int $ttl
 
 function ratatoskr_odata_get_all_with_cache_flag(string $url, array $auth, int $ttlSeconds): array
 {
-    if (function_exists('odata_mimir_enabled') && odata_mimir_enabled()) {
+    if (function_exists('odata_mimir_should_proxy') && odata_mimir_should_proxy()) {
         // Mímir beheert de BC-cache (max_age); lokale OData-filecache wordt overgeslagen.
+        // Na een Mímir-fout valt odata_get_all terug op de directe BC-route mét filecache.
         $rows = odata_get_all($url, $auth, max(0, $ttlSeconds));
         return [
             'rows' => $rows,
